@@ -1,36 +1,12 @@
-# 🛡️ SecScan Agent — Agente Inteligente de Revisión de Seguridad
+# 🛡️ Agente Inteligente de Revisión de Seguridad
 
 ## Descripción
 
-**SecScan Agent** es un agente inteligente de seguridad que analiza repositorios de código y archivos de logs para detectar vulnerabilidades comunes. Utiliza un sistema de **tools** (herramientas) y **skills** (habilidades) para razonar sobre el código, ejecutar análisis automatizados, y generar reportes priorizados.
+es un agente inteligente de seguridad que analiza repositorios de código y archivos de logs para detectar vulnerabilidades comunes. Utiliza un sistema de **tools** (herramientas) y **skills** (habilidades) para razonar sobre el código, ejecutar análisis automatizados, y generar reportes priorizados.
 
 ### Problemática que resuelve
 
 En el desarrollo de software, los equipos frecuentemente introducen vulnerabilidades de seguridad sin darse cuenta: secretos hardcodeados (API keys, contraseñas), dependencias con CVEs conocidos, inyecciones SQL, XSS, y configuraciones inseguras. Las revisiones manuales son lentas y propensas a errores. **SecScan Agent** automatiza este proceso usando IA.
-
-## 🏗️ Arquitectura Técnica
-
-```
-┌─────────────────────────────────────────────────┐
-│              SecScan Agent (Orquestador)         │
-│                                                   │
-│  ┌─────────┐  ┌──────────┐  ┌────────────────┐  │
-│  │ Planner │→ │ Executor │→ │ Report Builder │  │
-│  │ (LLM)   │  │ (Tools)  │  │ (Aggregator)   │  │
-│  └─────────┘  └──────────┘  └────────────────┘  │
-│       ↓            ↓                              │
-│  ┌─────────────────────────────────────────────┐  │
-│  │              Tool Registry                   │  │
-│  │                                               │  │
-│  │  🔑 SecretScanner    — Detecta secretos      │  │
-│  │  📦 DependencyAudit  — Audita dependencias   │  │
-│  │  💉 SQLiDetector     — Detecta inyección SQL │  │
-│  │  🌐 XSSDetector      — Detecta XSS           │  │
-│  │  📋 LogAnalyzer      — Analiza logs           │  │
-│  │  ⚙️  ConfigAuditor   — Audita configuración  │  │
-│  └─────────────────────────────────────────────┘  │
-└─────────────────────────────────────────────────┘
-```
 
 ## 🚀 Cómo ejecutar
 
