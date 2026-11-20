@@ -1,0 +1,1 @@
+# SecScan Agent — Report generation
