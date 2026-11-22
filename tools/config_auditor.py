@@ -9,14 +9,18 @@ Revisa archivos de configuración en busca de configuraciones peligrosas:
 - Configuraciones de seguridad faltantes
 """
 
-import re
 import os
+import re
+
+from agent.findings import Finding, mask_in_line, mask_secret
 
 
 CONFIG_PATTERNS = [
     {
         "name": "DEBUG habilitado",
-        "regex": r"""(?:DEBUG)\s*[=:]\s*(?:True|true|1|yes|on)""",
+        "cwe": "CWE-489",
+        "owasp": "A05:2021 Security Misconfiguration",
+        "regex": r"""DEBUG['"\]]*\s*[=:]\s*(?:True|true|1|yes|on)""",
         "severity": "MEDIA",
         "description": "Modo DEBUG habilitado. En producción, esto expone stack traces, "
                        "información del servidor y variables internas a los atacantes.",
@@ -24,7 +28,9 @@ CONFIG_PATTERNS = [
     },
     {
         "name": "SECRET_KEY débil/por defecto",
-        "regex": r"""SECRET_KEY\s*[=:]\s*['"](?:change[-_]?me|secret|default|password|12345|abcdef|your[-_]?secret|mysecret|test|dev(?:elopment)?|keyboard)['"]""",
+        "cwe": "CWE-798",
+        "owasp": "A07:2021 Identification and Authentication Failures",
+        "regex": r"""SECRET_KEY['"\]]*\s*[=:]\s*['"](?:change[-_]?me|secret|default|password|12345|abcdef|your[-_]?secret|mysecret|test|dev(?:elopment)?|keyboard)['"]""",
         "severity": "CRITICA",
         "description": "SECRET_KEY con valor débil o por defecto. Esto compromete la firma de sesiones, "
                        "CSRF tokens y datos cifrados.",
@@ -32,6 +38,8 @@ CONFIG_PATTERNS = [
     },
     {
         "name": "CORS permisivo (wildcard)",
+        "cwe": "CWE-942",
+        "owasp": "A05:2021 Security Misconfiguration",
         "regex": r"""(?:CORS_ORIGIN_ALLOW_ALL|Access-Control-Allow-Origin)\s*[=:]\s*(?:True|\*|['"]?\*['"]?)""",
         "severity": "ALTA",
         "description": "CORS configurado para permitir cualquier origen (*). "
@@ -40,6 +48,8 @@ CONFIG_PATTERNS = [
     },
     {
         "name": "ALLOWED_HOSTS permisivo",
+        "cwe": "",
+        "owasp": "A05:2021 Security Misconfiguration",
         "regex": r"""ALLOWED_HOSTS\s*=\s*\[\s*['"]?\*['"]?\s*\]""",
         "severity": "MEDIA",
         "description": "ALLOWED_HOSTS acepta cualquier hostname. Vulnerable a ataques de HTTP Host header.",
@@ -47,6 +57,8 @@ CONFIG_PATTERNS = [
     },
     {
         "name": "SSL/HTTPS deshabilitado",
+        "cwe": "CWE-319",
+        "owasp": "A02:2021 Cryptographic Failures",
         "regex": r"""(?:SECURE_SSL_REDIRECT|SESSION_COOKIE_SECURE|CSRF_COOKIE_SECURE)\s*[=:]\s*(?:False|false|0|no)""",
         "severity": "ALTA",
         "description": "Configuraciones de seguridad SSL/HTTPS deshabilitadas. "
@@ -55,6 +67,8 @@ CONFIG_PATTERNS = [
     },
     {
         "name": "Base de datos SQLite en producción",
+        "cwe": "",
+        "owasp": "A05:2021 Security Misconfiguration",
         "regex": r"""(?:ENGINE|database)\s*[=:]\s*['"].*sqlite3?['"]""",
         "severity": "MEDIA",
         "description": "SQLite configurada como base de datos. No es recomendable para producción "
@@ -63,6 +77,8 @@ CONFIG_PATTERNS = [
     },
     {
         "name": "Puerto de base de datos expuesto",
+        "cwe": "CWE-1327",
+        "owasp": "A05:2021 Security Misconfiguration",
         "regex": r"""(?:DB_HOST|DATABASE_HOST)\s*[=:]\s*['"]?(?:0\.0\.0\.0)['"]?""",
         "severity": "ALTA",
         "description": "Base de datos escuchando en todas las interfaces (0.0.0.0). "
@@ -71,6 +87,8 @@ CONFIG_PATTERNS = [
     },
     {
         "name": "Credencial en texto plano en config",
+        "cwe": "CWE-798",
+        "owasp": "A07:2021 Identification and Authentication Failures",
         "regex": r"""(?:DB_PASSWORD|DATABASE_PASSWORD|MYSQL_ROOT_PASSWORD|POSTGRES_PASSWORD)\s*[=:]\s*['"]([^'"]+)['"]""",
         "severity": "CRITICA",
         "description": "Contraseña de base de datos en archivo de configuración en texto plano.",
@@ -78,6 +96,8 @@ CONFIG_PATTERNS = [
     },
     {
         "name": "Logging insuficiente",
+        "cwe": "CWE-778",
+        "owasp": "A09:2021 Security Logging and Monitoring Failures",
         "regex": r"""(?:LOG_LEVEL|LOGGING)\s*[=:]\s*['"]?(?:NONE|OFF|NOTSET|none|off)['"]?""",
         "severity": "MEDIA",
         "description": "Logging deshabilitado o insuficiente. Dificulta la detección de incidentes "
@@ -86,6 +106,8 @@ CONFIG_PATTERNS = [
     },
     {
         "name": "Rate limiting deshabilitado",
+        "cwe": "CWE-307",
+        "owasp": "A07:2021 Identification and Authentication Failures",
         "regex": r"""(?:RATE_LIMIT|THROTTLE)\s*[=:]\s*(?:False|false|0|none|None|disabled)""",
         "severity": "MEDIA",
         "description": "Rate limiting deshabilitado. La API es vulnerable a ataques de fuerza bruta "
@@ -119,26 +141,28 @@ def audit_config(files: list[str]) -> list[dict]:
 
         for line_num, line in enumerate(lines, 1):
             for pattern in CONFIG_PATTERNS:
-                if re.search(pattern["regex"], line, re.IGNORECASE):
-                    findings.append({
-                        "tool": "ConfigAuditor",
-                        "file": filepath,
-                        "line": line_num,
-                        "content": line.strip()[:150],
-                        "type": pattern["name"],
-                        "severity": pattern["severity"],
-                        "description": pattern["description"],
-                        "recommendation": pattern["recommendation"],
-                        "matched_value": line.strip()[:80],
-                    })
+                match = re.search(pattern["regex"], line, re.IGNORECASE)
+                if not match:
+                    continue
+                content = line.strip()
+                matched = content[:80]
+                # Si el patrón captura un valor (p. ej. una contraseña), enmascararlo
+                if match.lastindex and match.group(1):
+                    content = mask_in_line(content, [match.group(1)])
+                    matched = mask_secret(match.group(1))
+                findings.append(Finding(
+                    tool="ConfigAuditor",
+                    file=filepath,
+                    line=line_num,
+                    content=content[:150],
+                    type=pattern["name"],
+                    severity=pattern["severity"],
+                    description=pattern["description"],
+                    recommendation=pattern["recommendation"],
+                    matched_value=matched,
+                    cwe=pattern["cwe"],
+                    owasp=pattern["owasp"],
+                    confidence="ALTA",
+                ).to_dict())
 
-    # Deduplicar
-    seen = set()
-    unique = []
-    for f in findings:
-        key = (f["file"], f["line"], f["type"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(f)
-
-    return unique
+    return findings

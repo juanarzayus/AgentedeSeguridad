@@ -10,9 +10,11 @@ Este módulo implementa el bucle principal del agente:
 El patrón es: OBSERVAR → RAZONAR → ACTUAR → REPORTAR
 """
 
+import os
 import time
 from colorama import Fore, Style, init
 
+from agent.findings import SEVERITY_ORDER, deduplicate, is_suppressed
 from agent.planner import Planner, ActionPlan
 from agent.tool_registry import ToolRegistry, ToolDefinition
 from tools.secret_scanner import scan_secrets
@@ -118,7 +120,29 @@ class SecScanOrchestrator:
         if details:
             self._log(f"     {details}", Fore.CYAN)
 
-    def run(self, target_path: str, logs_path: str | None = None) -> dict:
+    @staticmethod
+    def _apply_suppressions(findings: list[dict]) -> tuple[list[dict], int]:
+        """Descarta hallazgos cuya línea tiene `# secscan: ignore` o `# nosec`."""
+        cache: dict[str, list[str]] = {}
+        kept, suppressed = [], 0
+        for f in findings:
+            path, line = f.get("file", ""), f.get("line", 0)
+            if line > 0 and os.path.isfile(path):
+                if path not in cache:
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                            cache[path] = fh.read().splitlines()
+                    except OSError:
+                        cache[path] = []
+                lines = cache[path]
+                if line <= len(lines) and is_suppressed(lines[line - 1]):
+                    suppressed += 1
+                    continue
+            kept.append(f)
+        return kept, suppressed
+
+    def run(self, target_path: str, logs_path: str | None = None,
+            allowed_tools: list[str] | None = None) -> dict:
         """
         Ejecuta el agente de seguridad sobre un directorio objetivo.
 
@@ -128,6 +152,7 @@ class SecScanOrchestrator:
         Args:
             target_path: Ruta al directorio del proyecto a analizar.
             logs_path: Ruta opcional al directorio de logs.
+            allowed_tools: Herramientas que el skill permite ejecutar (None = todas).
 
         Returns:
             Diccionario con todos los hallazgos y metadata del análisis.
@@ -155,6 +180,8 @@ class SecScanOrchestrator:
         self._log(f"  📦 Dependencias: {'Sí' if context.has_requirements else 'No'}", Fore.CYAN)
         self._log(f"  ⚙️  Configuración: {'Sí' if context.has_config_files else 'No'}", Fore.CYAN)
         self._log(f"  📋 Logs: {'Sí' if context.has_log_files else 'No'}", Fore.CYAN)
+        if context.ignored_files:
+            self._log(f"  🙈 Ignorados por .secscanignore: {context.ignored_files}", Fore.CYAN)
 
         # ═══════════════════════════════════════
         # FASE 2: RAZONAR — Crear plan de acción
@@ -163,7 +190,7 @@ class SecScanOrchestrator:
         self._log("  🧠 FASE 2: RAZONAR — Creando plan de acción...", Fore.YELLOW)
         self._log("═" * 55, Fore.YELLOW)
 
-        plan = self.planner.create_plan(context)
+        plan = self.planner.create_plan(context, allowed_tools=allowed_tools)
 
         self._log(f"\n  📋 Plan generado: {len(plan.steps)} herramientas a ejecutar", Fore.GREEN)
         for i, step in enumerate(plan.steps, 1):
@@ -171,6 +198,8 @@ class SecScanOrchestrator:
 
         self._log(f"\n  🔧 Herramientas disponibles: {self.registry.tool_count}", Fore.CYAN)
         self._log(f"  🎯 Herramientas seleccionadas: {len(plan.steps)}", Fore.CYAN)
+        if plan.skipped:
+            self._log(f"  ⏭️  Omitidas por el skill: {', '.join(plan.skipped)}", Fore.CYAN)
 
         # ═══════════════════════════════════════
         # FASE 3: ACTUAR — Ejecutar herramientas
@@ -226,9 +255,16 @@ class SecScanOrchestrator:
         self._log("  📊 FASE 4: REPORTAR — Compilando resultados...", Fore.YELLOW)
         self._log("═" * 55, Fore.YELLOW)
 
-        # Priorizar hallazgos por severidad
-        severity_order = {"CRITICA": 0, "ALTA": 1, "MEDIA": 2, "BAJA": 3}
-        self.findings.sort(key=lambda f: severity_order.get(f.get("severity", "BAJA"), 4))
+        # Limpiar: supresiones en línea y duplicados (misma línea + mismo CWE, aunque
+        # lo hayan detectado herramientas distintas)
+        raw_count = len(self.findings)
+        self.findings, suppressed_count = self._apply_suppressions(self.findings)
+        self.findings = deduplicate(self.findings)
+        merged_count = raw_count - suppressed_count - len(self.findings)
+
+        # Priorizar hallazgos por severidad (y luego por ubicación, para un orden estable)
+        self.findings.sort(key=lambda f: (SEVERITY_ORDER.get(f.get("severity", "BAJA"), 4),
+                                          f.get("file", ""), f.get("line", 0)))
 
         # Conteo por severidad
         severity_counts = {}
@@ -243,6 +279,8 @@ class SecScanOrchestrator:
             tool_counts[tool] = tool_counts.get(tool, 0) + 1
 
         self._log(f"\n  🔍 Total de hallazgos: {len(self.findings)}", Fore.GREEN)
+        if merged_count or suppressed_count:
+            self._log(f"     ({merged_count} duplicados fusionados, {suppressed_count} suprimidos)", Fore.CYAN)
         for sev in ["CRITICA", "ALTA", "MEDIA", "BAJA"]:
             count = severity_counts.get(sev, 0)
             color_map = {"CRITICA": Fore.RED, "ALTA": Fore.YELLOW,
@@ -261,6 +299,9 @@ class SecScanOrchestrator:
             "tool_counts": tool_counts,
             "findings": self.findings,
             "execution_log": self.execution_log,
+            "tool_errors": sum(1 for e in self.execution_log if e["status"] == "error"),
+            "suppressed_count": suppressed_count,
+            "merged_duplicates": merged_count,
             "plan": plan.to_dict(),
             "context": {
                 "total_files": context.total_files,
@@ -270,6 +311,7 @@ class SecScanOrchestrator:
                 "has_config": context.has_config_files,
                 "has_logs": context.has_log_files,
                 "has_dependencies": context.has_requirements,
+                "ignored_files": context.ignored_files,
             },
             "total_time_seconds": round(total_time, 2),
         }

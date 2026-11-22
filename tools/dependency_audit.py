@@ -3,15 +3,36 @@ DependencyAudit — Herramienta para auditar dependencias inseguras.
 
 Revisa archivos de dependencias (requirements.txt, package.json)
 contra una base de datos local de vulnerabilidades conocidas (CVEs).
+
+Cómo se interpreta cada declaración de versión:
+- Versión exacta (`flask==2.2.0`, `"express": "4.17.1"`): se compara directamente.
+- Rango con cota inferior (`flask>=2.0`, `^4.17.0`, `~=2.0`): si la cota inferior
+  ya está corregida no hay hallazgo; si no, el rango *permite* instalar una versión
+  vulnerable y se reporta con severidad BAJA.
+- Rango acotado por arriba (`flask<2.3`): si ninguna versión permitida está
+  corregida, se reporta con la severidad completa del CVE.
+- Sin versión (`flask`): se reporta como dependencia sin fijar (BAJA).
 """
 
+import json
 import os
 import re
-from packaging import version as pkg_version
+
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import SpecifierSet
+from packaging.version import InvalidVersion, Version
+
+from agent.findings import Finding
+
+CWE_VULN_COMPONENT = "CWE-1395"  # Dependency on Vulnerable Third-Party Component
+OWASP_COMPONENTS = "A06:2021 Vulnerable and Outdated Components"
+
+# Una versión "infinitamente nueva" para saber si un rango no tiene cota superior
+_FAR_FUTURE = Version("99999")
 
 
-# Base de datos local de vulnerabilidades conocidas (simulada pero realista)
-# En producción usarías la API de OSV, Snyk, o GitHub Advisory DB
+# Base de datos local de vulnerabilidades conocidas (subconjunto real, mantenido a mano).
+# En producción usarías la API de OSV, Snyk, o GitHub Advisory DB.
 VULNERABILITY_DB = {
     # Paquetes Python
     "flask": [
@@ -57,15 +78,6 @@ VULNERABILITY_DB = {
             "fixed_in": "2.0.7",
         },
     ],
-    "sqlalchemy": [
-        {
-            "cve": "CVE-2023-XXXX",
-            "affected_versions": "<1.4.46",
-            "severity": "ALTA",
-            "description": "Posible inyección SQL en ciertas construcciones de consultas",
-            "fixed_in": "1.4.46",
-        },
-    ],
     "jinja2": [
         {
             "cve": "CVE-2024-22195",
@@ -102,15 +114,6 @@ VULNERABILITY_DB = {
             "fixed_in": "41.0.6",
         },
     ],
-    "numpy": [
-        {
-            "cve": "CVE-2023-XXXX",
-            "affected_versions": "<1.22.0",
-            "severity": "MEDIA",
-            "description": "Buffer overflow en operaciones de array",
-            "fixed_in": "1.22.0",
-        },
-    ],
     # Paquetes npm
     "express": [
         {
@@ -142,55 +145,110 @@ VULNERABILITY_DB = {
 }
 
 
-def _parse_requirements_txt(filepath: str) -> list[tuple[str, str]]:
-    """Parsea un requirements.txt y devuelve [(paquete, versión)]."""
+def normalize_name(name: str) -> str:
+    """Normaliza nombres de paquete según PEP 503 (Flask_SQLAlchemy == flask-sqlalchemy)."""
+    return re.sub(r"[-_.]+", "-", name).lower()
+
+
+def _parse_requirements_txt(filepath: str) -> list[tuple[str, SpecifierSet, int]]:
+    """Parsea un requirements.txt y devuelve [(paquete, especificador, línea)]."""
     packages = []
     with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or line.startswith("-"):
+        for line_num, raw in enumerate(f, 1):
+            line = raw.split("#", 1)[0].strip()
+            if not line or line.startswith("-"):
                 continue
-            # Parsear formato: paquete==version, paquete>=version, paquete
-            match = re.match(r"([a-zA-Z0-9_\-\.]+)\s*(?:[=<>!~]+\s*)?([\d][^\s,;]*)?", line)
-            if match:
-                name = match.group(1).lower().replace("-", "").replace("_", "")
-                ver = match.group(2) if match.group(2) else "unknown"
-                packages.append((match.group(1).lower(), ver))
+            try:
+                req = Requirement(line)
+            except InvalidRequirement:
+                continue
+            packages.append((normalize_name(req.name), req.specifier, line_num))
     return packages
 
 
-def _parse_package_json(filepath: str) -> list[tuple[str, str]]:
-    """Parsea un package.json y devuelve [(paquete, versión)]."""
-    import json
+def _npm_to_specifier(ver: str) -> SpecifierSet | None:
+    """Traduce una versión de npm a un SpecifierSet de PEP 440 (aproximación)."""
+    ver = ver.strip()
+    if ver in {"", "*", "latest", "x"}:
+        return SpecifierSet()
+    match = re.match(r"^(\^|~|>=|>|<=|<|=)?\s*v?(\d+(?:\.\d+){0,2})", ver)
+    if not match:
+        return None  # git URLs, file:, alias, etc.
+    op, number = match.groups()
+    if op in {"^", "~", ">=", "="} or op is None:
+        return SpecifierSet(f"=={number}" if op in {None, "="} else f">={number}")
+    return SpecifierSet(f"{op}{number}")
+
+
+def _parse_package_json(filepath: str) -> list[tuple[str, SpecifierSet, int]]:
+    """Parsea un package.json y devuelve [(paquete, especificador, línea)]."""
     packages = []
     try:
         with open(filepath, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        for dep_key in ["dependencies", "devDependencies"]:
-            deps = data.get(dep_key, {})
-            for name, ver in deps.items():
-                # Limpiar prefijos como ^, ~, >=
-                clean_ver = re.sub(r"^[\^~>=<]+", "", ver)
-                packages.append((name.lower(), clean_ver))
+            text = f.read()
+        data = json.loads(text)
     except (json.JSONDecodeError, OSError):
-        pass
+        return packages
+
+    lines = text.splitlines()
+    for dep_key in ["dependencies", "devDependencies"]:
+        for name, ver in data.get(dep_key, {}).items():
+            spec = _npm_to_specifier(str(ver))
+            if spec is None:
+                continue
+            line_num = next((i for i, l in enumerate(lines, 1) if f'"{name}"' in l), 0)
+            packages.append((name.lower(), spec, line_num))
     return packages
 
 
-def _is_vulnerable(installed_ver: str, affected_spec: str) -> bool:
-    """Verifica si una versión instalada es afectada por la vulnerabilidad."""
-    if installed_ver == "unknown":
-        return True  # Si no sabemos la versión, advertir
+def _lower_bound(spec: SpecifierSet) -> Version | None:
+    """La menor versión que el especificador declara como mínima (si existe)."""
+    bounds = []
+    for s in spec:
+        if s.operator in {"==", "===", ">=", ">", "~="} and "*" not in s.version:
+            try:
+                bounds.append(Version(s.version))
+            except InvalidVersion:
+                pass
+    return max(bounds) if bounds else None
 
-    try:
-        # Parsear la especificación "< X.Y.Z"
-        match = re.match(r"<\s*([\d\.]+)", affected_spec)
-        if match:
-            threshold = match.group(1)
-            return pkg_version.parse(installed_ver) < pkg_version.parse(threshold)
-    except Exception:
-        return False
-    return False
+
+def _exact_version(spec: SpecifierSet) -> Version | None:
+    for s in spec:
+        if s.operator in {"==", "==="} and "*" not in s.version:
+            try:
+                return Version(s.version)
+            except InvalidVersion:
+                return None
+    return None
+
+
+def assess(spec: SpecifierSet, fixed_in: str) -> str:
+    """
+    Evalúa un especificador de versión frente a una vulnerabilidad corregida en `fixed_in`.
+
+    Returns:
+        "vulnerable"    — todas las versiones permitidas están afectadas.
+        "range_allows"  — el rango permite instalar una versión afectada.
+        "unpinned"      — no hay restricción de versión.
+        "safe"          — ninguna versión permitida está afectada.
+    """
+    fixed = Version(fixed_in)
+
+    exact = _exact_version(spec)
+    if exact is not None:
+        return "vulnerable" if exact < fixed else "safe"
+
+    if len(spec) == 0:
+        return "unpinned"
+
+    lower = _lower_bound(spec)
+    if lower is not None and lower >= fixed:
+        return "safe"
+
+    # ¿Existe alguna versión corregida permitida por el rango?
+    allows_fixed = spec.contains(fixed, prereleases=True) or spec.contains(_FAR_FUTURE, prereleases=True)
+    return "range_allows" if allows_fixed else "vulnerable"
 
 
 def audit_dependencies(files: list[str]) -> list[dict]:
@@ -210,8 +268,6 @@ def audit_dependencies(files: list[str]) -> list[dict]:
             continue
 
         basename = os.path.basename(filepath).lower()
-
-        # Parsear según tipo de archivo
         if basename == "requirements.txt":
             packages = _parse_requirements_txt(filepath)
         elif basename == "package.json":
@@ -219,26 +275,59 @@ def audit_dependencies(files: list[str]) -> list[dict]:
         else:
             continue
 
-        # Verificar cada paquete contra la DB de vulnerabilidades
-        for pkg_name, pkg_ver in packages:
-            # Normalizar nombre para búsqueda
-            normalized = pkg_name.lower().replace("-", "").replace("_", "")
-            db_key = pkg_name.lower()
+        for pkg_name, spec, line_num in packages:
+            vulns = VULNERABILITY_DB.get(pkg_name, [])
+            declared = f"{pkg_name}{spec}" if len(spec) else pkg_name
 
-            # Buscar en la base de datos
-            vulns = VULNERABILITY_DB.get(db_key, [])
+            if vulns and len(spec) == 0:
+                cves = ", ".join(v["cve"] for v in vulns)
+                findings.append(Finding(
+                    tool="DependencyAudit",
+                    file=filepath,
+                    line=line_num,
+                    content=declared,
+                    type="Dependencia sin versión fijada",
+                    severity="BAJA",
+                    description=f"{pkg_name} no fija versión. Según lo que se instale podría "
+                                f"estar afectado por: {cves}.",
+                    recommendation=f"Fijar la versión de {pkg_name} (p. ej. con un lockfile o "
+                                   f"pip-compile) en una versión corregida.",
+                    matched_value=declared,
+                    cwe=CWE_VULN_COMPONENT,
+                    owasp=OWASP_COMPONENTS,
+                    confidence="BAJA",
+                ).to_dict())
+                continue
+
             for vuln in vulns:
-                if _is_vulnerable(pkg_ver, vuln["affected_versions"]):
-                    findings.append({
-                        "tool": "DependencyAudit",
-                        "file": filepath,
-                        "line": 0,
-                        "content": f"{pkg_name}=={pkg_ver}",
-                        "type": f"CVE: {vuln['cve']}",
-                        "severity": vuln["severity"],
-                        "description": f"{pkg_name} {pkg_ver}: {vuln['description']}",
-                        "recommendation": f"Actualizar {pkg_name} a versión {vuln['fixed_in']} o superior.",
-                        "matched_value": f"{pkg_name}=={pkg_ver}",
-                    })
+                verdict = assess(spec, vuln["fixed_in"])
+                if verdict == "safe":
+                    continue
+
+                if verdict == "vulnerable":
+                    severity, confidence = vuln["severity"], "ALTA"
+                    description = f"{declared}: {vuln['description']}"
+                    vtype = f"CVE: {vuln['cve']}"
+                else:  # range_allows
+                    severity, confidence = "BAJA", "MEDIA"
+                    description = (f"{declared} permite instalar versiones anteriores a "
+                                   f"{vuln['fixed_in']}, afectadas por {vuln['cve']}: "
+                                   f"{vuln['description']}")
+                    vtype = f"CVE: {vuln['cve']} (rango permisivo)"
+
+                findings.append(Finding(
+                    tool="DependencyAudit",
+                    file=filepath,
+                    line=line_num,
+                    content=declared,
+                    type=vtype,
+                    severity=severity,
+                    description=description,
+                    recommendation=f"Actualizar {pkg_name} a versión {vuln['fixed_in']} o superior.",
+                    matched_value=declared,
+                    cwe=CWE_VULN_COMPONENT,
+                    owasp=OWASP_COMPONENTS,
+                    confidence=confidence,
+                ).to_dict())
 
     return findings

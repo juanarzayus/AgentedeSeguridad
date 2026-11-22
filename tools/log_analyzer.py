@@ -9,15 +9,21 @@ Detecta patrones de ataque comunes en archivos de log:
 - Intentos de acceso a archivos sensibles
 """
 
-import re
 import os
+import re
 from collections import Counter, defaultdict
+
+from agent.findings import Finding
+
+# Los hallazgos de logs son indicios de ataque (detección), no vulnerabilidades del código
+OWASP_MONITORING = "A09:2021 Security Logging and Monitoring Failures"
 
 
 # Patrones de ataque en logs
 ATTACK_PATTERNS = [
     {
         "name": "Intento de SQL Injection en URL",
+        "cwe": "CWE-89",
         "regex": r"""(?:UNION\s+SELECT|OR\s+1\s*=\s*1|'\s*OR\s*'|DROP\s+TABLE|;\s*DELETE|SLEEP\s*\(|BENCHMARK\s*\(|0x[0-9a-fA-F]+|CHAR\s*\()""",
         "severity": "CRITICA",
         "description": "Intento de inyección SQL detectado en la URL/parámetros de la solicitud.",
@@ -25,6 +31,7 @@ ATTACK_PATTERNS = [
     },
     {
         "name": "Path Traversal",
+        "cwe": "CWE-22",
         "regex": r"""(?:\.\./|\.\.\\|%2e%2e%2f|%2e%2e/|\.%2e/|%2e\./|\.\.%5c|\.\.%255c)""",
         "severity": "ALTA",
         "description": "Intento de path traversal (acceso a directorios padre) detectado.",
@@ -32,6 +39,7 @@ ATTACK_PATTERNS = [
     },
     {
         "name": "Acceso a archivos sensibles",
+        "cwe": "CWE-538",
         "regex": r"""(?:/etc/passwd|/etc/shadow|\.env|wp-config\.php|web\.config|\.git/config|\.htaccess|/proc/self|\.ssh/|id_rsa)""",
         "severity": "ALTA",
         "description": "Intento de acceso a archivos sensibles del sistema o aplicación.",
@@ -39,6 +47,7 @@ ATTACK_PATTERNS = [
     },
     {
         "name": "Escaneo de directorios/admin",
+        "cwe": "",
         "regex": r"""(?:/admin|/phpmyadmin|/wp-admin|/wp-login|/administrator|/manager|/console|/actuator|/swagger|/api-docs|/graphql)""",
         "severity": "MEDIA",
         "description": "Escaneo de rutas administrativas comunes detectado.",
@@ -46,6 +55,7 @@ ATTACK_PATTERNS = [
     },
     {
         "name": "XSS en URL",
+        "cwe": "CWE-79",
         "regex": r"""(?:<script|javascript:|onerror\s*=|onload\s*=|<img\s+src|<iframe|<svg\s+onload|alert\s*\()""",
         "severity": "ALTA",
         "description": "Intento de XSS detectado en parámetros de la URL.",
@@ -53,6 +63,7 @@ ATTACK_PATTERNS = [
     },
     {
         "name": "Command Injection",
+        "cwe": "CWE-78",
         "regex": r"""(?:;\s*(?:cat|ls|id|whoami|pwd|wget|curl|nc)\s|`.*`|\$\(.*\)|%0a|%0d|\|\s*(?:cat|id|whoami))""",
         "severity": "CRITICA",
         "description": "Posible intento de inyección de comandos del sistema operativo.",
@@ -60,6 +71,7 @@ ATTACK_PATTERNS = [
     },
     {
         "name": "Fuerza bruta (401/403 repetidos)",
+        "cwe": "CWE-307",
         "regex": r"""\s(?:401|403)\s""",
         "severity": "MEDIA",
         "description": "Múltiples respuestas 401/403 pueden indicar intento de fuerza bruta.",
@@ -67,6 +79,7 @@ ATTACK_PATTERNS = [
     },
     {
         "name": "Scanner/Bot conocido",
+        "cwe": "",
         "regex": r"""(?:sqlmap|nikto|nmap|burpsuite|dirbuster|gobuster|wfuzz|hydra|metasploit|nessus)""",
         "severity": "ALTA",
         "description": "User-Agent de herramienta de escaneo/ataque conocida detectada.",
@@ -119,17 +132,20 @@ def analyze_logs(files: list[str]) -> list[dict]:
                             auth_failures[ip] += 1
                         continue  # Se procesará después como grupo
 
-                    findings.append({
-                        "tool": "LogAnalyzer",
-                        "file": filepath,
-                        "line": line_num,
-                        "content": line.strip()[:200],
-                        "type": pattern["name"],
-                        "severity": pattern["severity"],
-                        "description": pattern["description"],
-                        "recommendation": pattern["recommendation"],
-                        "matched_value": f"IP: {ip}" if ip else "IP desconocida",
-                    })
+                    findings.append(Finding(
+                        tool="LogAnalyzer",
+                        file=filepath,
+                        line=line_num,
+                        content=line.strip()[:200],
+                        type=pattern["name"],
+                        severity=pattern["severity"],
+                        description=pattern["description"],
+                        recommendation=pattern["recommendation"],
+                        matched_value=f"IP: {ip}" if ip else "IP desconocida",
+                        cwe=pattern["cwe"],
+                        owasp=OWASP_MONITORING,
+                        confidence="MEDIA",
+                    ).to_dict())
                     if ip:
                         ip_attacks[ip].append(pattern["name"])
 
@@ -137,35 +153,40 @@ def analyze_logs(files: list[str]) -> list[dict]:
     for ip, count in auth_failures.items():
         if count >= 5:  # Umbral: 5 o más fallos
             severity = "CRITICA" if count >= 20 else "ALTA" if count >= 10 else "MEDIA"
-            findings.append({
-                "tool": "LogAnalyzer",
-                "file": "múltiples logs",
-                "line": 0,
-                "content": f"IP {ip}: {count} intentos fallidos de autenticación",
-                "type": "Fuerza bruta detectada",
-                "severity": severity,
-                "description": f"La IP {ip} tiene {count} respuestas 401/403, indicando "
-                               f"un posible ataque de fuerza bruta.",
-                "recommendation": f"Bloquear IP {ip}. Implementar rate limiting y bloqueo temporal de cuentas.",
-                "matched_value": f"IP: {ip} ({count} intentos)",
-            })
+            findings.append(Finding(
+                tool="LogAnalyzer",
+                file="múltiples logs",
+                line=0,
+                content=f"IP {ip}: {count} intentos fallidos de autenticación",
+                type="Fuerza bruta detectada",
+                severity=severity,
+                description=f"La IP {ip} tiene {count} respuestas 401/403, indicando "
+                            f"un posible ataque de fuerza bruta.",
+                recommendation=f"Bloquear IP {ip}. Implementar rate limiting y bloqueo temporal de cuentas.",
+                matched_value=f"IP: {ip} ({count} intentos)",
+                cwe="CWE-307",
+                owasp=OWASP_MONITORING,
+                confidence="ALTA",
+            ).to_dict())
 
     # Detectar IPs con múltiples tipos de ataque (atacante activo)
     for ip, attacks in ip_attacks.items():
         unique_attacks = set(attacks)
         if len(unique_attacks) >= 3:
-            findings.append({
-                "tool": "LogAnalyzer",
-                "file": "múltiples logs",
-                "line": 0,
-                "content": f"IP {ip}: {len(unique_attacks)} tipos de ataque diferentes",
-                "type": "Atacante activo detectado",
-                "severity": "CRITICA",
-                "description": f"La IP {ip} está realizando múltiples tipos de ataque: "
-                               f"{', '.join(unique_attacks)}. Indica un atacante activo.",
-                "recommendation": f"Bloquear IP {ip} inmediatamente. Revisar todos los logs. "
-                                  f"Verificar si hubo acceso exitoso.",
-                "matched_value": f"IP: {ip}",
-            })
+            findings.append(Finding(
+                tool="LogAnalyzer",
+                file="múltiples logs",
+                line=0,
+                content=f"IP {ip}: {len(unique_attacks)} tipos de ataque diferentes",
+                type="Atacante activo detectado",
+                severity="CRITICA",
+                description=f"La IP {ip} está realizando múltiples tipos de ataque: "
+                            f"{', '.join(sorted(unique_attacks))}. Indica un atacante activo.",
+                recommendation=f"Bloquear IP {ip} inmediatamente. Revisar todos los logs. "
+                               f"Verificar si hubo acceso exitoso.",
+                matched_value=f"IP: {ip}",
+                owasp=OWASP_MONITORING,
+                confidence="ALTA",
+            ).to_dict())
 
     return findings

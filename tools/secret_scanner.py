@@ -5,21 +5,31 @@ Busca patrones que indiquen credenciales, API keys, tokens, contraseñas
 y otros secretos que no deberían estar en el código fuente.
 """
 
-import re
+import math
 import os
-from dataclasses import dataclass, field
+import re
 
+from agent.findings import Finding, mask_in_line, mask_secret
 
-@dataclass
-class SecretFinding:
-    """Un secreto encontrado en el código."""
-    file: str
-    line_number: int
-    line_content: str
-    secret_type: str
-    severity: str  # CRITICA, ALTA, MEDIA, BAJA
-    description: str
-    recommendation: str
+CWE_HARDCODED = "CWE-798"
+OWASP_AUTH = "A07:2021 Identification and Authentication Failures"
+
+# Valores que claramente NO son secretos reales (placeholders, plantillas, lecturas de env)
+PLACEHOLDER_REGEX = re.compile(
+    r"""^(?:
+        (?:your|insert|enter|replace|put)[-_ ][\w-]*
+      | x{4,}|\*{3,}|\.{3,}|-{3,}
+      | <[^>]+>|\$\{[^}]+\}|\{\{[^}]+\}\}|%\([^)]+\)s
+      | changeme|change[-_]me|placeholder|dummy|sample|todo|tbd|none|null|undefined
+      | password|passwd|secret|token|apikey|api[-_]key
+    )$""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+# Patrones genéricos: basados en el nombre de la variable, no en un formato conocido.
+# Para estos se exige una entropía mínima, que filtra valores como "aaaaaaaaaaaaaaaaaaaa".
+ENTROPY_CHECKED = {"Generic API Key", "Token Genérico"}
+MIN_ENTROPY = 3.0
 
 
 # Patrones de secretos comunes con sus expresiones regulares
@@ -40,6 +50,7 @@ SECRET_PATTERNS = [
     },
     {
         "name": "Generic API Key",
+        "confidence": "MEDIA",
         "regex": r"""(?:api[_-]?key|apikey|api[_-]?secret)\s*[=:]\s*['"]([a-zA-Z0-9_\-]{20,})['"]""",
         "severity": "CRITICA",
         "description": "API key hardcoded en el código fuente",
@@ -47,6 +58,7 @@ SECRET_PATTERNS = [
     },
     {
         "name": "Contraseña Hardcoded",
+        "confidence": "MEDIA",
         "regex": r"""(?:password|passwd|pwd|pass)\s*[=:]\s*['"]([^'"]{4,})['"]""",
         "severity": "CRITICA",
         "description": "Contraseña en texto plano en el código",
@@ -54,6 +66,7 @@ SECRET_PATTERNS = [
     },
     {
         "name": "Token Genérico",
+        "confidence": "MEDIA",
         "regex": r"""(?:token|auth_token|access_token|bearer)\s*[=:]\s*['"]([a-zA-Z0-9_\-\.]{20,})['"]""",
         "severity": "ALTA",
         "description": "Token de autenticación detectado en el código",
@@ -96,7 +109,7 @@ SECRET_PATTERNS = [
     },
     {
         "name": "SECRET_KEY (Django/Flask)",
-        "regex": r"""SECRET_KEY\s*[=:]\s*['"]([^'"]{8,})['"]""",
+        "regex": r"""SECRET_KEY['"\]]*\s*[=:]\s*['"]([^'"]{8,})['"]""",
         "severity": "ALTA",
         "description": "SECRET_KEY del framework web hardcoded",
         "recommendation": "Generar una clave aleatoria fuerte y almacenarla en variables de entorno.",
@@ -104,15 +117,39 @@ SECRET_PATTERNS = [
 ]
 
 
+def shannon_entropy(value: str) -> float:
+    """Entropía de Shannon en bits por carácter."""
+    if not value:
+        return 0.0
+    counts = {c: value.count(c) for c in set(value)}
+    n = len(value)
+    return -sum((k / n) * math.log2(k / n) for k in counts.values())
+
+
+def _is_placeholder(value: str) -> bool:
+    stripped = value.strip()
+    return bool(PLACEHOLDER_REGEX.match(stripped)) or len(set(stripped)) <= 2
+
+
+def _secret_value(match: re.Match) -> str:
+    """El valor secreto: el primer grupo si el patrón lo captura, si no el match completo."""
+    if match.lastindex and match.group(1):
+        return match.group(1)
+    return match.group(0)
+
+
 def scan_secrets(files: list[str]) -> list[dict]:
     """
     Escanea una lista de archivos en busca de secretos expuestos.
+
+    Ningún secreto sale de esta función en claro: tanto `content` (la línea)
+    como `matched_value` se enmascaran.
 
     Args:
         files: Lista de rutas a archivos para escanear.
 
     Returns:
-        Lista de hallazgos con información detallada de cada secreto encontrado.
+        Lista de hallazgos (dicts de `Finding`).
     """
     findings = []
 
@@ -122,38 +159,49 @@ def scan_secrets(files: list[str]) -> list[dict]:
 
         # Ignorar archivos binarios y muy grandes
         try:
-            file_size = os.path.getsize(filepath)
-            if file_size > 1_000_000:  # > 1MB, probablemente binario
+            if os.path.getsize(filepath) > 1_000_000:  # > 1MB, probablemente binario
                 continue
-
             with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
                 lines = f.readlines()
         except (OSError, PermissionError):
             continue
 
         for line_num, line in enumerate(lines, 1):
-            # Ignorar líneas de comentario que son ejemplos
             stripped = line.strip()
+            # Ignorar líneas de comentario que son ejemplos
             if stripped.startswith("#") and "example" in stripped.lower():
                 continue
 
+            line_hits = []  # (pattern, secret_value)
             for pattern in SECRET_PATTERNS:
-                matches = re.finditer(pattern["regex"], line, re.IGNORECASE)
-                for match in matches:
-                    # Enmascarar el secreto para el reporte
-                    secret_value = match.group(0)
-                    masked = secret_value[:8] + "****" + secret_value[-4:] if len(secret_value) > 12 else "****"
+                for match in re.finditer(pattern["regex"], line, re.IGNORECASE):
+                    value = _secret_value(match)
+                    if _is_placeholder(value):
+                        continue
+                    if pattern["name"] in ENTROPY_CHECKED and shannon_entropy(value) < MIN_ENTROPY:
+                        continue
+                    line_hits.append((pattern, value))
 
-                    findings.append({
-                        "tool": "SecretScanner",
-                        "file": filepath,
-                        "line": line_num,
-                        "content": line.strip()[:120],  # Truncar para seguridad
-                        "type": pattern["name"],
-                        "severity": pattern["severity"],
-                        "description": pattern["description"],
-                        "recommendation": pattern["recommendation"],
-                        "matched_value": masked,
-                    })
+            if not line_hits:
+                continue
+
+            # Enmascarar TODOS los secretos de la línea antes de guardarla
+            masked_line = mask_in_line(stripped, [v for _, v in line_hits])[:120]
+
+            for pattern, value in line_hits:
+                findings.append(Finding(
+                    tool="SecretScanner",
+                    file=filepath,
+                    line=line_num,
+                    content=masked_line,
+                    type=pattern["name"],
+                    severity=pattern["severity"],
+                    description=pattern["description"],
+                    recommendation=pattern["recommendation"],
+                    matched_value=mask_secret(value),
+                    cwe=CWE_HARDCODED,
+                    owasp=OWASP_AUTH,
+                    confidence=pattern.get("confidence", "ALTA"),
+                ).to_dict())
 
     return findings

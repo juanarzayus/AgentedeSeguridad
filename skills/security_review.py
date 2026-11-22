@@ -93,7 +93,13 @@ class SecurityReviewSkill:
 
         # Crear y ejecutar el orquestador
         orchestrator = SecScanOrchestrator(verbose=self.verbose)
-        results = orchestrator.run(target_path, logs_path)
+        results = orchestrator.run(
+            target_path,
+            logs_path,
+            allowed_tools=skill_info["tools_used"],
+        )
+        if "error" in results:
+            return results
 
         # Generar reporte
         generator = ReportGenerator()

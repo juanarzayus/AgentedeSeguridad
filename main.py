@@ -14,6 +14,13 @@ Uso:
     python main.py --target ./mi_proyecto --logs ./logs --format html
     python main.py --target ./mi_proyecto --format json
     python main.py --help
+
+Códigos de salida:
+    0  Sin hallazgos
+    1  Hallazgos de severidad ALTA, MEDIA o BAJA
+    2  Al menos un hallazgo CRÍTICO
+    3  Error de uso o de ejecución (argumentos inválidos, directorio inexistente,
+       una herramienta falló)
 """
 
 import argparse
@@ -26,6 +33,19 @@ from skills.security_review import SecurityReviewSkill
 
 # Inicializar colores
 init(autoreset=True)
+
+EXIT_CLEAN = 0
+EXIT_FINDINGS = 1
+EXIT_CRITICAL = 2
+EXIT_ERROR = 3
+
+
+class SecScanArgumentParser(argparse.ArgumentParser):
+    """argparse sale con código 2 ante un error de uso; aquí 2 significa 'críticos'."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(EXIT_ERROR, f"{self.prog}: error: {message}\n")
 
 
 def print_banner():
@@ -74,7 +94,7 @@ def print_tools_info():
 
 def main():
     """Punto de entrada principal del agente."""
-    parser = argparse.ArgumentParser(
+    parser = SecScanArgumentParser(
         description="🛡️ SecScan Agent — Agente Inteligente de Revisión de Seguridad",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
@@ -84,6 +104,8 @@ Ejemplos:
   python main.py --target ./test_project --format html
   python main.py --target ./test_project --skill quick_scan
   python main.py --list-tools
+
+Códigos de salida: 0 = sin hallazgos, 1 = hallazgos, 2 = hallazgos críticos, 3 = error
         """,
     )
 
@@ -127,7 +149,8 @@ Ejemplos:
     args = parser.parse_args()
 
     # Mostrar banner
-    print_banner()
+    if not args.quiet or args.list_tools:
+        print_banner()
 
     # Si pidieron listar herramientas
     if args.list_tools:
@@ -139,12 +162,12 @@ Ejemplos:
         print(f"{Fore.RED}  ❌ Error: Debe especificar un directorio con --target{Style.RESET_ALL}")
         print(f"  Uso: python main.py --target ./mi_proyecto")
         print(f"  Demo: python main.py --target ./test_project --format html")
-        return 1
+        return EXIT_ERROR
 
     # Validar que el directorio existe
     if not os.path.isdir(args.target):
         print(f"{Fore.RED}  ❌ Error: El directorio '{args.target}' no existe{Style.RESET_ALL}")
-        return 1
+        return EXIT_ERROR
 
     # Validar directorio de logs si se proporcionó
     if args.logs and not os.path.isdir(args.logs):
@@ -161,6 +184,10 @@ Ejemplos:
         output_dir=args.output,
     )
 
+    if "error" in results:
+        print(f"{Fore.RED}  ❌ Error: {results['error']}{Style.RESET_ALL}")
+        return EXIT_ERROR
+
     # Resumen final
     total = results.get("total_findings", 0)
     critical = results.get("severity_counts", {}).get("CRITICA", 0)
@@ -175,14 +202,19 @@ Ejemplos:
         print(f"  {Fore.YELLOW}⚠️  Se encontraron {total} hallazgos de seguridad{Style.RESET_ALL}")
 
     print(f"  📄 Reporte: {results.get('report_path', 'N/A')}")
+    tool_errors = results.get("tool_errors", 0)
+    if tool_errors:
+        print(f"  {Fore.RED}❌ {tool_errors} herramienta(s) fallaron: el análisis está incompleto.{Style.RESET_ALL}")
     print(f"{'═' * 55}\n")
 
-    # Código de salida basado en severidad
+    # Código de salida: un análisis incompleto no puede reportarse como "limpio"
+    if tool_errors:
+        return EXIT_ERROR
     if critical > 0:
-        return 2  # Vulnerabilidades críticas
-    elif total > 0:
-        return 1  # Vulnerabilidades encontradas
-    return 0
+        return EXIT_CRITICAL
+    if total > 0:
+        return EXIT_FINDINGS
+    return EXIT_CLEAN
 
 
 if __name__ == "__main__":

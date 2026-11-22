@@ -7,9 +7,15 @@ Genera reportes en tres formatos:
 - JSON (para integración con otras herramientas)
 """
 
+import html
 import json
 import os
 from datetime import datetime
+
+
+def esc(value) -> str:
+    """Escapa cualquier valor para insertarlo en HTML (texto o atributo)."""
+    return html.escape(str(value), quote=True)
 
 
 class ReportGenerator:
@@ -68,7 +74,9 @@ class ReportGenerator:
             sev = finding.get("severity", "?")
             lines.extend([
                 f"  [{i}] {sev} — {finding.get('type', 'N/A')}",
-                f"      Herramienta: {finding.get('tool', 'N/A')}",
+                f"      Herramienta: {finding.get('tool', 'N/A')}"
+                + (f" (también: {', '.join(finding['also_detected_by'])})" if finding.get('also_detected_by') else ""),
+                f"      CWE: {finding.get('cwe') or 'N/A'} | Confianza: {finding.get('confidence', 'N/A')}",
                 f"      Archivo: {finding.get('file', 'N/A')}:{finding.get('line', 0)}",
                 f"      Código: {finding.get('content', 'N/A')[:100]}",
                 f"      Descripción: {finding.get('description', 'N/A')}",
@@ -153,22 +161,25 @@ class ReportGenerator:
                 "BAJA": "🔵",
             }.get(sev, "⚪")
 
-            # Escapar HTML
-            content = (f.get("content", "")[:100]
-                       .replace("&", "&amp;")
-                       .replace("<", "&lt;")
-                       .replace(">", "&gt;"))
+            # TODO lo que viene de los archivos analizados es input no confiable:
+            # nombres de archivo, líneas de código, logs... se escapa todo.
+            tools = f.get("tool", "N/A")
+            if f.get("also_detected_by"):
+                tools += " + " + " + ".join(f["also_detected_by"])
+            type_cell = esc(f.get("type", "N/A"))
+            if f.get("cwe"):
+                type_cell += f'<br><small class="cwe">{esc(f["cwe"])}</small>'
 
             findings_rows += f"""
             <tr>
                 <td>{i}</td>
-                <td><span class="{sev_class}">{sev_icon} {sev}</span></td>
-                <td>{f.get('tool', 'N/A')}</td>
-                <td>{f.get('type', 'N/A')}</td>
-                <td><code>{os.path.basename(f.get('file', ''))}</code>:{f.get('line', 0)}</td>
-                <td><code>{content}</code></td>
-                <td>{f.get('description', '')[:120]}</td>
-                <td>{f.get('recommendation', '')[:120]}</td>
+                <td><span class="{sev_class}">{sev_icon} {esc(sev)}</span></td>
+                <td>{esc(tools)}</td>
+                <td>{type_cell}</td>
+                <td><code>{esc(os.path.basename(f.get('file', '')))}</code>:{esc(f.get('line', 0))}</td>
+                <td><code>{esc(f.get('content', '')[:100])}</code></td>
+                <td>{esc(f.get('description', '')[:160])}</td>
+                <td>{esc(f.get('recommendation', '')[:160])}</td>
             </tr>"""
 
         # Generar pasos del plan
@@ -176,8 +187,8 @@ class ReportGenerator:
         for step in results.get("plan", {}).get("steps", []):
             plan_steps += f"""
             <div class="plan-step">
-                <strong>Paso {step.get('order', '?')}:</strong> [{step.get('tool', '?')}]<br>
-                <em>{step.get('reason', 'N/A')[:200]}</em>
+                <strong>Paso {esc(step.get('order', '?'))}:</strong> [{esc(step.get('tool', '?'))}]<br>
+                <em>{esc(step.get('reason', 'N/A')[:200])}</em>
             </div>"""
 
         # Generar log de ejecución
@@ -186,11 +197,11 @@ class ReportGenerator:
             status_icon = "✅" if entry.get("status") == "success" else "❌"
             exec_log += f"""
             <tr>
-                <td>{entry.get('step', '?')}</td>
-                <td>{entry.get('tool', '?')}</td>
-                <td>{status_icon} {entry.get('status', '?')}</td>
-                <td>{entry.get('findings_count', 0)}</td>
-                <td>{entry.get('time_seconds', 0)}s</td>
+                <td>{esc(entry.get('step', '?'))}</td>
+                <td>{esc(entry.get('tool', '?'))}</td>
+                <td title="{esc(entry.get('error', ''))}">{status_icon} {esc(entry.get('status', '?'))}</td>
+                <td>{esc(entry.get('findings_count', 0))}</td>
+                <td>{esc(entry.get('time_seconds', 0))}s</td>
             </tr>"""
 
         risk_color = {
@@ -333,6 +344,7 @@ class ReportGenerator:
         .color-high {{ color: #d29922; }}
         .color-medium {{ color: #58a6ff; }}
         .color-low {{ color: #8b949e; }}
+        .cwe {{ color: #8b949e; }}
 
         footer {{
             text-align: center;
@@ -460,7 +472,7 @@ class ReportGenerator:
         <section>
             <h2>📋 Información del Análisis</h2>
             <table>
-                <tr><td><strong>Proyecto analizado</strong></td><td>{results.get('target', 'N/A')}</td></tr>
+                <tr><td><strong>Proyecto analizado</strong></td><td>{esc(results.get('target', 'N/A'))}</td></tr>
                 <tr><td><strong>Fecha</strong></td><td>{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</td></tr>
                 <tr><td><strong>Tiempo total</strong></td><td>{results.get('total_time_seconds', 0)} segundos</td></tr>
                 <tr><td><strong>Archivos analizados</strong></td><td>{results.get('context', {}).get('total_files', 0)}</td></tr>

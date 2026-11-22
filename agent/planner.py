@@ -9,9 +9,39 @@ Utiliza un sistema de reglas + heurísticas para simular razonamiento,
 similar a cómo un LLM planificaría una secuencia de acciones.
 """
 
+import fnmatch
 import os
 from pathlib import Path
 from dataclasses import dataclass, field
+
+IGNORE_FILE = ".secscanignore"
+DEFAULT_IGNORED_DIRS = {".git", "__pycache__", "node_modules", ".venv", "venv", ".tox"}
+
+
+def load_ignore_patterns(target_path: str) -> list[str]:
+    """
+    Lee `.secscanignore` (un patrón glob por línea, `#` para comentarios).
+
+    Los patrones se comparan contra la ruta relativa al proyecto y contra el
+    nombre del archivo, p. ej. `tests/*`, `*.min.js`, `docs/`.
+    """
+    path = os.path.join(target_path, IGNORE_FILE)
+    if not os.path.isfile(path):
+        return []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return [l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")]
+
+
+def is_ignored(rel_path: str, patterns: list[str]) -> bool:
+    rel_path = rel_path.replace(os.sep, "/")
+    name = rel_path.rsplit("/", 1)[-1]
+    for pattern in patterns:
+        if pattern.endswith("/"):
+            if rel_path.startswith(pattern) or f"/{pattern}" in f"/{rel_path}":
+                return True
+        elif fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(name, pattern):
+            return True
+    return False
 
 
 @dataclass
@@ -31,6 +61,8 @@ class ScanContext:
     has_log_files: bool = False
     total_files: int = 0
     file_list: list = field(default_factory=list)
+    log_file_list: list = field(default_factory=list)
+    ignored_files: int = 0
 
 
 @dataclass
@@ -39,9 +71,15 @@ class ActionPlan:
     steps: list[dict] = field(default_factory=list)
     reasoning: list[str] = field(default_factory=list)
     context: ScanContext | None = None
+    allowed_tools: list[str] | None = None
+    skipped: list[str] = field(default_factory=list)
 
     def add_step(self, tool_name: str, params: dict, reason: str) -> None:
-        """Agrega un paso al plan con su justificación."""
+        """Agrega un paso al plan con su justificación (si el skill lo permite)."""
+        if self.allowed_tools is not None and tool_name not in self.allowed_tools:
+            self.skipped.append(tool_name)
+            self.reasoning.append(f"Omitido: {tool_name} — no forma parte del skill seleccionado.")
+            return
         self.steps.append({
             "tool": tool_name,
             "params": params,
@@ -55,6 +93,7 @@ class ActionPlan:
             "total_steps": len(self.steps),
             "steps": self.steps,
             "reasoning": self.reasoning,
+            "skipped_tools": self.skipped,
         }
 
 
@@ -94,14 +133,21 @@ class Planner:
         if not target.exists():
             raise FileNotFoundError(f"Directorio no encontrado: {target_path}")
 
+        ignore_patterns = load_ignore_patterns(target_path)
+        seen: set[Path] = set()
+
         # Recorrer archivos del proyecto
         for root, dirs, files in os.walk(target_path):
             # Ignorar directorios irrelevantes
-            dirs[:] = [d for d in dirs if d not in {
-                ".git", "__pycache__", "node_modules", ".venv", "venv", ".tox",
-            }]
+            dirs[:] = [d for d in dirs if d not in DEFAULT_IGNORED_DIRS]
             for f in files:
                 filepath = os.path.join(root, f)
+                if f == IGNORE_FILE:
+                    continue
+                if is_ignored(os.path.relpath(filepath, target_path), ignore_patterns):
+                    ctx.ignored_files += 1
+                    continue
+                seen.add(Path(filepath).resolve())
                 ext = os.path.splitext(f)[1].lower()
 
                 ctx.file_list.append(filepath)
@@ -117,11 +163,9 @@ class Planner:
                     ctx.has_html_files = True
                 elif ext == ".sql":
                     ctx.has_sql_files = True
-                elif ext == ".log":
-                    ctx.has_log_files = True
 
                 # Detectar archivos especiales
-                if f in {"requirements.txt", "Pipfile", "pyproject.toml", "package.json"}:
+                if f in self.DEPENDENCY_FILES:
                     ctx.has_requirements = True
                     if f == "package.json":
                         ctx.has_package_json = True
@@ -130,23 +174,31 @@ class Planner:
                 if f.startswith(".env"):
                     ctx.has_env_files = True
 
-        # Verificar directorio de logs
-        if logs_path and os.path.exists(logs_path):
-            for f in os.listdir(logs_path):
-                if f.endswith(".log") or f.endswith(".txt"):
+        # Logs: solo los del directorio indicado con --logs (comparando rutas reales,
+        # no strings, para que funcione con rutas relativas/absolutas mezcladas)
+        if logs_path and os.path.isdir(logs_path):
+            for f in sorted(os.listdir(logs_path)):
+                filepath = os.path.join(logs_path, f)
+                if os.path.isfile(filepath) and (f.endswith(".log") or f.endswith(".txt")):
+                    ctx.log_file_list.append(filepath)
                     ctx.has_log_files = True
-                    ctx.file_list.append(os.path.join(logs_path, f))
+                    if Path(filepath).resolve() not in seen:
+                        ctx.file_list.append(filepath)
 
         return ctx
 
-    def create_plan(self, ctx: ScanContext) -> ActionPlan:
+    def create_plan(self, ctx: ScanContext, allowed_tools: list[str] | None = None) -> ActionPlan:
         """
         PASO 2 y 3: RAZONAR + PLANIFICAR
-        
+
         Basándose en el contexto observado, decide qué herramientas ejecutar
         y en qué orden. Prioriza por impacto de seguridad.
+
+        Args:
+            ctx: Contexto observado del proyecto.
+            allowed_tools: Herramientas que el skill permite usar. None = todas.
         """
-        plan = ActionPlan(context=ctx)
+        plan = ActionPlan(context=ctx, allowed_tools=allowed_tools)
 
         # --- Razonamiento del agente ---
 
@@ -156,7 +208,7 @@ class Planner:
         code_files = [f for f in ctx.file_list if os.path.splitext(f)[1] in self.CODE_EXTENSIONS]
         config_files = [f for f in ctx.file_list if os.path.basename(f).lower() in {n.lower() for n in self.CONFIG_FILES}]
         env_files = [f for f in ctx.file_list if os.path.basename(f).startswith(".env")]
-        all_scan_files = list(set(code_files + config_files + env_files))
+        all_scan_files = sorted(set(code_files + config_files + env_files))
 
         if all_scan_files:
             plan.add_step(
@@ -188,14 +240,15 @@ class Planner:
                 "concatenación de strings o f-strings sin parametrización."
             )
 
-        # SI hay archivos HTML/JS → buscar XSS
-        if ctx.has_html_files or ctx.has_js_files:
+        # SI hay archivos HTML/JS o Python (Flask/Django renderizan HTML) → buscar XSS
+        if ctx.has_html_files or ctx.has_js_files or ctx.has_python_files:
             web_files = [f for f in ctx.file_list if os.path.splitext(f)[1] in self.WEB_EXTENSIONS]
             plan.add_step(
                 "xss_detector",
-                {"files": web_files + code_files},
-                "Se detectaron archivos web (HTML/JS). Analizar en busca de vulnerabilidades "
-                "XSS: contenido renderizado sin sanitización, innerHTML, document.write."
+                {"files": list(dict.fromkeys(web_files + code_files))},
+                "Se detectaron archivos web (HTML/JS) o código de servidor que genera HTML. "
+                "Analizar en busca de XSS y SSTI: contenido renderizado sin sanitización, "
+                "innerHTML, document.write, render_template_string."
             )
 
         # SI hay archivos de configuración → auditar configuración
@@ -209,18 +262,14 @@ class Planner:
             )
 
         # SI hay logs → analizar logs
-        if ctx.has_log_files and ctx.logs_path:
-            log_files = [f for f in ctx.file_list if f.endswith(".log") or f.endswith(".txt")]
-            # Filtrar solo los que están en el directorio de logs
-            log_dir_files = [f for f in log_files if ctx.logs_path in f]
-            if log_dir_files:
-                plan.add_step(
-                    "log_analyzer",
-                    {"files": log_dir_files},
-                    "Se detectaron archivos de logs. Analizar en busca de patrones de ataque: "
-                    "intentos de fuerza bruta, path traversal, inyección SQL en URLs, "
-                    "y otros indicadores de compromiso."
-                )
+        if ctx.log_file_list:
+            plan.add_step(
+                "log_analyzer",
+                {"files": ctx.log_file_list},
+                "Se detectaron archivos de logs. Analizar en busca de patrones de ataque: "
+                "intentos de fuerza bruta, path traversal, inyección SQL en URLs, "
+                "y otros indicadores de compromiso."
+            )
 
         return plan
 

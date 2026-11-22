@@ -5,13 +5,18 @@ Busca patrones en código HTML, JavaScript y templates donde el contenido
 generado dinámicamente no se sanitiza antes de renderizarse en el navegador.
 """
 
-import re
 import os
+import re
+
+from agent.findings import Finding
+
+OWASP_INJECTION = "A03:2021 Injection"
 
 
 XSS_PATTERNS = [
     {
         "name": "innerHTML sin sanitización",
+        "cwe": "CWE-79",
         "regex": r"""\.innerHTML\s*=\s*(?!['"]<)""",
         "severity": "ALTA",
         "description": "Asignación directa a innerHTML con contenido dinámico. "
@@ -20,6 +25,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "document.write()",
+        "cwe": "CWE-79",
         "regex": r"""document\.write\s*\(""",
         "severity": "ALTA",
         "description": "document.write() puede inyectar HTML/JS arbitrario en el DOM.",
@@ -27,6 +33,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "eval() con input dinámico",
+        "cwe": "CWE-95",
         "regex": r"""eval\s*\(\s*(?!['"])""",
         "severity": "CRITICA",
         "description": "eval() ejecuta código JavaScript arbitrario. Si recibe input del usuario, "
@@ -35,6 +42,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "Jinja2/Flask sin escape (|safe)",
+        "cwe": "CWE-79",
         "regex": r"""\{\{.*\|\s*safe\s*\}\}""",
         "severity": "ALTA",
         "description": "Template Jinja2 con filtro |safe desactiva el auto-escape. "
@@ -43,6 +51,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "Template sin escape ({% autoescape false %})",
+        "cwe": "CWE-79",
         "regex": r"""\{%\s*autoescape\s+false\s*%\}""",
         "severity": "ALTA",
         "description": "Auto-escape desactivado en bloque de template. Todo el contenido dinámico "
@@ -51,6 +60,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "render_template_string() en Flask",
+        "cwe": "CWE-1336",
         "regex": r"""render_template_string\s*\(""",
         "severity": "CRITICA",
         "description": "render_template_string() con input del usuario permite Server-Side Template "
@@ -59,6 +69,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "jQuery .html() con datos dinámicos",
+        "cwe": "CWE-79",
         "regex": r"""\$\(.*\)\.html\s*\(\s*(?!['"])""",
         "severity": "ALTA",
         "description": "jQuery .html() inyecta HTML sin sanitización, similar a innerHTML.",
@@ -66,6 +77,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "Respuesta HTTP sin Content-Type",
+        "cwe": "CWE-79",
         "regex": r"""(?:make_response|Response)\s*\([^)]*\)(?!.*content_type)""",
         "severity": "MEDIA",
         "description": "Respuesta HTTP sin Content-Type explícito puede ser interpretada como HTML.",
@@ -73,6 +85,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "Markup.format() en Flask/Jinja2",
+        "cwe": "CWE-79",
         "regex": r"""Markup\s*\(.*\.format\(""",
         "severity": "ALTA",
         "description": "Markup() con .format() puede inyectar HTML si las variables no están escapadas.",
@@ -110,25 +123,19 @@ def detect_xss(files: list[str]) -> list[dict]:
         for line_num, line in enumerate(lines, 1):
             for pattern in XSS_PATTERNS:
                 if re.search(pattern["regex"], line, re.IGNORECASE):
-                    findings.append({
-                        "tool": "XSSDetector",
-                        "file": filepath,
-                        "line": line_num,
-                        "content": line.strip()[:150],
-                        "type": pattern["name"],
-                        "severity": pattern["severity"],
-                        "description": pattern["description"],
-                        "recommendation": pattern["recommendation"],
-                        "matched_value": line.strip()[:80],
-                    })
+                    findings.append(Finding(
+                        tool="XSSDetector",
+                        file=filepath,
+                        line=line_num,
+                        content=line.strip()[:150],
+                        type=pattern["name"],
+                        severity=pattern["severity"],
+                        description=pattern["description"],
+                        recommendation=pattern["recommendation"],
+                        matched_value=line.strip()[:80],
+                        cwe=pattern["cwe"],
+                        owasp=OWASP_INJECTION,
+                        confidence="MEDIA",
+                    ).to_dict())
 
-    # Deduplicar
-    seen = set()
-    unique = []
-    for f in findings:
-        key = (f["file"], f["line"], f["type"])
-        if key not in seen:
-            seen.add(key)
-            unique.append(f)
-
-    return unique
+    return findings
