@@ -52,7 +52,34 @@ python main.py --help
 python main.py --target ./test_project --logs ./test_project/logs --format html
 ```
 
-Esto generará un reporte completo en `reports/security_report.html`.
+Esto generará un reporte completo en `reports/security_report_<AAAAMMDD_HHMMSS>.html`.
+
+### Códigos de salida
+
+| Código | Significado |
+|--------|-------------|
+| `0` | Sin hallazgos |
+| `1` | Hallazgos de severidad ALTA, MEDIA o BAJA |
+| `2` | Al menos un hallazgo CRÍTICO |
+| `3` | Error de uso o de ejecución (argumento inválido, directorio inexistente, una herramienta falló) |
+
+### Suprimir falsos positivos
+
+- **En línea:** agregar `# secscan: ignore` (o `# nosec`) al final de la línea.
+- **Por archivo o directorio:** crear un `.secscanignore` en la raíz del proyecto analizado, con un patrón glob por línea:
+
+```
+# fixtures de tests
+tests/fixtures/
+*.min.js
+```
+
+### Ejecutar los tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
+```
 
 ## 📁 Estructura del Proyecto
 
@@ -60,11 +87,13 @@ Esto generará un reporte completo en `reports/security_report.html`.
 Agente/
 ├── main.py                  # Punto de entrada y CLI
 ├── requirements.txt         # Dependencias
+├── requirements-dev.txt     # Dependencias de desarrollo (pytest)
 ├── README.md                # Este archivo
 │
 ├── agent/                   # Núcleo del agente
 │   ├── __init__.py
 │   ├── orchestrator.py      # Orquestador principal (razonamiento + ejecución)
+│   ├── findings.py          # Modelo Finding, enmascarado, deduplicación, supresiones
 │   ├── planner.py           # Planificador basado en reglas
 │   └── tool_registry.py     # Registro y gestión de herramientas
 │
@@ -103,16 +132,20 @@ Agente/
 | **quick_scan** | Escaneo rápido enfocado en secretos y SQLi |
 | **dependency_check** | Solo revisa dependencias inseguras |
 
+Cada skill define qué herramientas puede usar; el planner omite (y lo deja registrado en el plan) las que no forman parte del skill.
+
 ## 🔧 Tools del Agente
 
 | Tool | Función | Detecta |
 |------|---------|---------|
 | `SecretScanner` | Escanea código buscando secretos | API keys, passwords, tokens, claves privadas |
 | `DependencyAudit` | Revisa dependencias contra CVEs | Paquetes con vulnerabilidades conocidas |
-| `SQLiDetector` | Analiza código por inyección SQL | Consultas SQL concatenadas, f-strings en queries |
+| `SQLiDetector` | Analiza código por inyección SQL (AST en Python, regex en otros lenguajes) | Consultas SQL concatenadas, f-strings, `.format()`, `%`; sigue variables y detecta input de `request.*` |
 | `XSSDetector` | Detecta vulnerabilidades XSS | HTML sin escapar, `innerHTML`, `document.write` |
 | `LogAnalyzer` | Analiza logs de acceso | Fuerza bruta, path traversal, SQL injection attempts |
 | `ConfigAuditor` | Revisa archivos de configuración | DEBUG=True, CORS *, SECRET_KEY débil |
+
+Cada hallazgo incluye su **CWE**, categoría **OWASP Top 10**, un nivel de **confianza** y, si varias herramientas detectaron lo mismo, cuáles (`also_detected_by`). Los secretos se enmascaran siempre antes de llegar al reporte.
 
 ## 📊 Ejemplo de Reporte
 
