@@ -71,8 +71,9 @@ def _icon_source(name: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         svg = f.read()
     svg = re.sub(r"<!--.*?-->", "", svg, flags=re.S).strip()
-    # Quitar width/height/class originales: el tamaño lo define el CSS
-    svg = re.sub(r'\s(width|height|class)="[^"]*"', "", svg)
+    # Quitar width/height/class originales SOLO de <svg> (los <rect> los necesitan)
+    svg = re.sub(r"<svg\b[^>]*>",
+                 lambda m: re.sub(r'\s(width|height|class)="[^"]*"', "", m.group(0)), svg, count=1)
     return re.sub(r"\s+", " ", svg)
 
 
