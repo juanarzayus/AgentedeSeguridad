@@ -13,6 +13,8 @@ ENV/
 reports/*.html
 reports/*.json
 reports/*.txt
+reports/*.pdf
+reports/*/
 !reports/.gitkeep
 
 # IDEs
