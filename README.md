@@ -1,4 +1,4 @@
-# SecScan Agent — Agente Inteligente de Revisión de Seguridad
+# SecScan Agent - Agente Inteligente de Revisión de Seguridad
 
 ## Descripción
 
@@ -19,7 +19,7 @@ En el desarrollo de software, los equipos frecuentemente introducen vulnerabilid
 
 ```bash
 # Clonar el repositorio
-git clone <url-del-repo>
+git clone https://github.com/juanarzayus/AgentedeSeguridad.git
 cd Agente
 
 # Instalar dependencias
@@ -104,12 +104,12 @@ Idiomas disponibles con `--lang`: `es` (por defecto) y `en`.
 
 El reporte está pensado para tomar decisiones:
 
-1. **Resumen ejecutivo** — puntaje de riesgo 0–100, veredicto ("No apto para producción", etc.) y distribución por severidad.
-2. **Acciones prioritarias** — los hallazgos agrupados por la acción que los corrige (p. ej. "Rotar credenciales" resuelve 16 hallazgos), con severidad y esfuerzo estimado.
+1. **Resumen ejecutivo** - puntaje de riesgo 0-100, veredicto ("No apto para producción", etc.) y distribución por severidad.
+2. **Acciones prioritarias** - los hallazgos agrupados por la acción que los corrige (p. ej. "Rotar credenciales" resuelve 16 hallazgos), con severidad y esfuerzo estimado.
 3. **OWASP Top 10 y archivos más afectados.**
-4. **Actividad de amenazas** — los eventos de los logs se informan aparte de las vulnerabilidades del código: IPs atacantes, tipos de ataque y atacantes activos.
-5. **Hallazgos detallados** — riesgo, corrección, CWE y el código con contexto. Los secretos aparecen siempre enmascarados, también en las líneas de contexto.
-6. **Razonamiento del agente** — el plan que siguió y por qué eligió cada herramienta.
+4. **Actividad de amenazas** - los eventos de los logs se informan aparte de las vulnerabilidades del código: IPs atacantes, tipos de ataque y atacantes activos.
+5. **Hallazgos detallados** - riesgo, corrección, CWE y el código con contexto. Los secretos aparecen siempre enmascarados, también en las líneas de contexto.
+6. **Razonamiento del agente** - el plan que siguió y por qué eligió cada herramienta.
 
 ### Códigos de salida
 
@@ -229,16 +229,16 @@ Cada hallazgo incluye su **CWE**, categoría **OWASP Top 10**, un nivel de **con
 
 El agente genera un reporte priorizado con severidades:
 
-- **CRÍTICA** — Secretos expuestos, inyección SQL confirmada
-- **ALTA** — Dependencias con CVE conocido, XSS
-- **MEDIA** — Configuraciones inseguras, debug habilitado
-- **BAJA** — Mejores prácticas, sugerencias de hardening
+- **CRÍTICA** - Secretos expuestos, inyección SQL confirmada
+- **ALTA** - Dependencias con CVE conocido, XSS
+- **MEDIA** - Configuraciones inseguras, debug habilitado
+- **BAJA** - Mejores prácticas, sugerencias de hardening
 
 ## Equipo
 
-- Proyecto Final — Inteligencia Artificial
+- Proyecto Final - Inteligencia Artificial
 - Línea 4: Agentes Inteligentes con Tools y Skills
 
 ## Licencia
 
-Proyecto académico — Universidad
+Proyecto académico - Universidad Santiago de Cali
