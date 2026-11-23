@@ -12,10 +12,10 @@ El patrón es: OBSERVAR → RAZONAR → ACTUAR → REPORTAR
 
 import os
 import time
-from colorama import Fore, Style, init
 
 from agent.findings import SEVERITY_ORDER, deduplicate, is_suppressed
 from agent.planner import Planner, ActionPlan
+from agent.ui import NullReporter, RichReporter
 from agent.tool_registry import ToolRegistry, ToolDefinition
 from tools.secret_scanner import scan_secrets
 from tools.dependency_audit import audit_dependencies
@@ -23,9 +23,6 @@ from tools.sqli_detector import detect_sqli
 from tools.xss_detector import detect_xss
 from tools.log_analyzer import analyze_logs
 from tools.config_auditor import audit_config
-
-# Inicializar colorama para colores en terminal
-init(autoreset=True)
 
 
 class SecScanOrchestrator:
@@ -36,8 +33,15 @@ class SecScanOrchestrator:
     Planner (razonamiento) → Tools (ejecución) → Report (presentación)
     """
 
-    def __init__(self, verbose: bool = True):
+    def __init__(self, verbose: bool = True, reporter=None):
+        """
+        Args:
+            verbose: Mostrar el progreso en la terminal (ignorado si se pasa `reporter`).
+            reporter: Receptor de eventos de progreso (ver agent/ui.py). Permite que
+                      otra interfaz (p. ej. una web) muestre la ejecución en vivo.
+        """
         self.verbose = verbose
+        self.ui = reporter or (RichReporter() if verbose else NullReporter())
         self.registry = ToolRegistry()
         self.planner = Planner()
         self.findings: list[dict] = []
@@ -102,24 +106,6 @@ class SecScanOrchestrator:
         for tool in tools:
             self.registry.register(tool)
 
-    def _log(self, message: str, color: str = Fore.WHITE):
-        """Imprime un mensaje si el modo verbose está activo."""
-        if self.verbose:
-            print(f"{color}{message}{Style.RESET_ALL}")
-
-    def _log_step(self, step_num: int, tool_name: str, status: str, details: str = ""):
-        """Registra la ejecución de un paso del plan."""
-        icons = {
-            "INICIANDO": "🔄",
-            "COMPLETADO": "✅",
-            "ERROR": "❌",
-            "SIN_HALLAZGOS": "✨",
-        }
-        icon = icons.get(status, "❓")
-        self._log(f"\n  {icon} Paso {step_num}: [{tool_name}] — {status}")
-        if details:
-            self._log(f"     {details}", Fore.CYAN)
-
     @staticmethod
     def _apply_suppressions(findings: list[dict]) -> tuple[list[dict], int]:
         """Descarta hallazgos cuya línea tiene `# secscan: ignore` o `# nosec`."""
@@ -161,99 +147,41 @@ class SecScanOrchestrator:
         self.findings = []
         self.execution_log = []
 
-        # ═══════════════════════════════════════
-        # FASE 1: OBSERVAR — Analizar el contexto
-        # ═══════════════════════════════════════
-        self._log("\n" + "═" * 55, Fore.YELLOW)
-        self._log("  🔍 FASE 1: OBSERVAR — Analizando el proyecto...", Fore.YELLOW)
-        self._log("═" * 55, Fore.YELLOW)
-
+        # ── FASE 1: OBSERVAR — Analizar el contexto ──
+        self.ui.phase(1, "observe")
         try:
             context = self.planner.analyze_context(target_path, logs_path)
         except FileNotFoundError as e:
-            self._log(f"\n  ❌ Error: {e}", Fore.RED)
             return {"error": str(e), "findings": []}
+        self.ui.context(context)
 
-        self._log(f"\n  📂 Directorio: {target_path}", Fore.CYAN)
-        self._log(f"  📄 Archivos encontrados: {context.total_files}", Fore.CYAN)
-        self._log(f"  🐍 Archivos Python: {'Sí' if context.has_python_files else 'No'}", Fore.CYAN)
-        self._log(f"  📦 Dependencias: {'Sí' if context.has_requirements else 'No'}", Fore.CYAN)
-        self._log(f"  ⚙️  Configuración: {'Sí' if context.has_config_files else 'No'}", Fore.CYAN)
-        self._log(f"  📋 Logs: {'Sí' if context.has_log_files else 'No'}", Fore.CYAN)
-        if context.ignored_files:
-            self._log(f"  🙈 Ignorados por .secscanignore: {context.ignored_files}", Fore.CYAN)
-
-        # ═══════════════════════════════════════
-        # FASE 2: RAZONAR — Crear plan de acción
-        # ═══════════════════════════════════════
-        self._log("\n" + "═" * 55, Fore.YELLOW)
-        self._log("  🧠 FASE 2: RAZONAR — Creando plan de acción...", Fore.YELLOW)
-        self._log("═" * 55, Fore.YELLOW)
-
+        # ── FASE 2: RAZONAR — Crear plan de acción ──
+        self.ui.phase(2, "reason")
         plan = self.planner.create_plan(context, allowed_tools=allowed_tools)
+        self.ui.plan(plan, self.registry.tool_count)
 
-        self._log(f"\n  📋 Plan generado: {len(plan.steps)} herramientas a ejecutar", Fore.GREEN)
-        for i, step in enumerate(plan.steps, 1):
-            self._log(f"  {i}. {step['tool']}: {step['reason'][:80]}...", Fore.WHITE)
-
-        self._log(f"\n  🔧 Herramientas disponibles: {self.registry.tool_count}", Fore.CYAN)
-        self._log(f"  🎯 Herramientas seleccionadas: {len(plan.steps)}", Fore.CYAN)
-        if plan.skipped:
-            self._log(f"  ⏭️  Omitidas por el skill: {', '.join(plan.skipped)}", Fore.CYAN)
-
-        # ═══════════════════════════════════════
-        # FASE 3: ACTUAR — Ejecutar herramientas
-        # ═══════════════════════════════════════
-        self._log("\n" + "═" * 55, Fore.YELLOW)
-        self._log("  ⚡ FASE 3: ACTUAR — Ejecutando herramientas...", Fore.YELLOW)
-        self._log("═" * 55, Fore.YELLOW)
-
+        # ── FASE 3: ACTUAR — Ejecutar herramientas ──
+        self.ui.phase(3, "act")
+        total_steps = len(plan.steps)
         for i, step in enumerate(plan.steps, 1):
             tool_name = step["tool"]
-            params = step["params"]
-
-            self._log_step(i, tool_name, "INICIANDO")
-
             step_start = time.time()
-            try:
-                results = self.registry.execute_tool(tool_name, **params)
-                step_time = time.time() - step_start
-
-                if results:
+            with self.ui.step_start(i, total_steps, tool_name):
+                try:
+                    results = self.registry.execute_tool(tool_name, **step["params"]) or []
                     self.findings.extend(results)
-                    self._log_step(i, tool_name, "COMPLETADO",
-                                   f"{len(results)} hallazgos en {step_time:.2f}s")
-                else:
-                    self._log_step(i, tool_name, "SIN_HALLAZGOS",
-                                   f"Ninguna vulnerabilidad detectada ({step_time:.2f}s)")
+                    entry = {"step": i, "tool": tool_name, "status": "success",
+                             "findings_count": len(results)}
+                except Exception as e:  # una herramienta rota no detiene al agente
+                    entry = {"step": i, "tool": tool_name, "status": "error",
+                             "error": str(e), "findings_count": 0}
+            entry["time_seconds"] = round(time.time() - step_start, 2)
+            self.execution_log.append(entry)
+            self.ui.step_end(i, total_steps, entry)
 
-                self.execution_log.append({
-                    "step": i,
-                    "tool": tool_name,
-                    "status": "success",
-                    "findings_count": len(results),
-                    "time_seconds": round(step_time, 2),
-                })
-
-            except Exception as e:
-                step_time = time.time() - step_start
-                self._log_step(i, tool_name, "ERROR", str(e))
-                self.execution_log.append({
-                    "step": i,
-                    "tool": tool_name,
-                    "status": "error",
-                    "error": str(e),
-                    "time_seconds": round(step_time, 2),
-                })
-
-        # ═══════════════════════════════════════
-        # FASE 4: REPORTAR — Compilar resultados
-        # ═══════════════════════════════════════
+        # ── FASE 4: REPORTAR — Compilar resultados ──
+        self.ui.phase(4, "report")
         total_time = time.time() - start_time
-
-        self._log("\n" + "═" * 55, Fore.YELLOW)
-        self._log("  📊 FASE 4: REPORTAR — Compilando resultados...", Fore.YELLOW)
-        self._log("═" * 55, Fore.YELLOW)
 
         # Limpiar: supresiones en línea y duplicados (misma línea + mismo CWE, aunque
         # lo hayan detectado herramientas distintas)
@@ -278,20 +206,7 @@ class SecScanOrchestrator:
             tool = f.get("tool", "Unknown")
             tool_counts[tool] = tool_counts.get(tool, 0) + 1
 
-        self._log(f"\n  🔍 Total de hallazgos: {len(self.findings)}", Fore.GREEN)
-        if merged_count or suppressed_count:
-            self._log(f"     ({merged_count} duplicados fusionados, {suppressed_count} suprimidos)", Fore.CYAN)
-        for sev in ["CRITICA", "ALTA", "MEDIA", "BAJA"]:
-            count = severity_counts.get(sev, 0)
-            color_map = {"CRITICA": Fore.RED, "ALTA": Fore.YELLOW,
-                         "MEDIA": Fore.CYAN, "BAJA": Fore.BLUE}
-            if count > 0:
-                self._log(f"    {'🔴' if sev == 'CRITICA' else '🟠' if sev == 'ALTA' else '🟡' if sev == 'MEDIA' else '🔵'} "
-                          f"{sev}: {count}", color_map.get(sev, Fore.WHITE))
-
-        self._log(f"\n  ⏱️  Tiempo total: {total_time:.2f} segundos", Fore.CYAN)
-
-        return {
+        results = {
             "target": target_path,
             "logs_path": logs_path,
             "total_findings": len(self.findings),
@@ -315,3 +230,5 @@ class SecScanOrchestrator:
             },
             "total_time_seconds": round(total_time, 2),
         }
+        self.ui.summary(results)
+        return results

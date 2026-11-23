@@ -11,6 +11,7 @@ Este skill implementa tres modos de operación:
 """
 
 from agent.orchestrator import SecScanOrchestrator
+from agent.ui import console
 from report.generator import ReportGenerator
 
 
@@ -48,8 +49,9 @@ class SecurityReviewSkill:
         },
     }
 
-    def __init__(self, verbose: bool = True):
+    def __init__(self, verbose: bool = True, reporter=None):
         self.verbose = verbose
+        self.reporter = reporter
 
     def list_skills(self) -> dict:
         """Lista los skills disponibles con sus descripciones."""
@@ -62,6 +64,7 @@ class SecurityReviewSkill:
         logs_path: str | None = None,
         output_format: str = "text",
         output_dir: str = "reports",
+        lang: str = "es",
     ) -> dict:
         """
         Ejecuta un skill de seguridad.
@@ -72,6 +75,7 @@ class SecurityReviewSkill:
             logs_path: Ruta opcional a logs.
             output_format: Formato del reporte (text, html, json).
             output_dir: Directorio de salida para reportes.
+            lang: Idioma del reporte (es, en).
 
         Returns:
             Resultados del análisis.
@@ -84,15 +88,12 @@ class SecurityReviewSkill:
 
         skill_info = self.SKILL_DEFINITIONS[skill_name]
 
-        if self.verbose:
-            print(f"\n{'═' * 55}")
-            print(f"  🎯 Ejecutando Skill: {skill_info['name']}")
-            print(f"  📝 {skill_info['description'][:80]}...")
-            print(f"  🔧 Tools: {', '.join(skill_info['tools_used'])}")
-            print(f"{'═' * 55}")
+        if self.verbose and self.reporter is None:
+            console.print(f"\n  [dim]Skill[/]  [bold]{skill_name}[/] [dim]·[/] {skill_info['name']}")
+            console.print(f"  [dim]Tools[/]  {', '.join(skill_info['tools_used'])}")
 
         # Crear y ejecutar el orquestador
-        orchestrator = SecScanOrchestrator(verbose=self.verbose)
+        orchestrator = SecScanOrchestrator(verbose=self.verbose, reporter=self.reporter)
         results = orchestrator.run(
             target_path,
             logs_path,
@@ -101,18 +102,12 @@ class SecurityReviewSkill:
         if "error" in results:
             return results
 
-        # Generar reporte
-        generator = ReportGenerator()
-        report_path = generator.generate(
+        # Generar reporte (skill_used antes, para que el reporte lo muestre)
+        results["skill_used"] = skill_name
+        results["report_path"] = ReportGenerator().generate(
             results,
             format=output_format,
             output_dir=output_dir,
+            lang=lang,
         )
-
-        results["report_path"] = report_path
-        results["skill_used"] = skill_name
-
-        if self.verbose:
-            print(f"\n  📄 Reporte generado: {report_path}")
-
         return results

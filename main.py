@@ -12,7 +12,7 @@ un sistema de Tools (herramientas) y Skills (habilidades).
 Uso:
     python main.py --target ./mi_proyecto
     python main.py --target ./mi_proyecto --logs ./logs --format html
-    python main.py --target ./mi_proyecto --format json
+    python main.py --target ./mi_proyecto --format pdf --lang en
     python main.py --help
 
 Códigos de salida:
@@ -20,24 +20,35 @@ Códigos de salida:
     1  Hallazgos de severidad ALTA, MEDIA o BAJA
     2  Al menos un hallazgo CRÍTICO
     3  Error de uso o de ejecución (argumentos inválidos, directorio inexistente,
-       una herramienta falló)
+       una herramienta falló, PDF no disponible)
 """
 
 import argparse
-import sys
 import os
+import sys
 
-from colorama import Fore, Style, init
+from rich import box
+from rich.table import Table
 
+from agent.ui import console, print_banner, print_final
+from report.generator import FORMATS, PdfUnavailableError
+from report.i18n import SUPPORTED_LANGS
+from report.insights import build_insights
 from skills.security_review import SecurityReviewSkill
-
-# Inicializar colores
-init(autoreset=True)
 
 EXIT_CLEAN = 0
 EXIT_FINDINGS = 1
 EXIT_CRITICAL = 2
 EXIT_ERROR = 3
+
+TOOLS_INFO = [
+    ("SecretScanner", "Secretos expuestos: API keys, contraseñas, tokens, claves privadas"),
+    ("DependencyAudit", "Dependencias con CVE conocidos (requirements.txt, package.json)"),
+    ("SQLiDetector", "Inyección SQL (análisis AST en Python, regex en otros lenguajes)"),
+    ("XSSDetector", "Cross-Site Scripting y Server-Side Template Injection"),
+    ("ConfigAuditor", "Configuración insegura: DEBUG, CORS, SSL, SECRET_KEY"),
+    ("LogAnalyzer", "Patrones de ataque en logs: fuerza bruta, traversal, escáneres"),
+]
 
 
 class SecScanArgumentParser(argparse.ArgumentParser):
@@ -48,166 +59,113 @@ class SecScanArgumentParser(argparse.ArgumentParser):
         self.exit(EXIT_ERROR, f"{self.prog}: error: {message}\n")
 
 
-def print_banner():
-    """Imprime el banner del agente."""
-    banner = f"""{Fore.CYAN}
-    ╔═══════════════════════════════════════════════════════╗
-    ║                                                       ║
-    ║   🛡️  SecScan Agent v1.0                              ║
-    ║   Agente Inteligente de Revisión de Seguridad          ║
-    ║                                                       ║
-    ║   Tools:  SecretScanner | DependencyAudit | SQLi      ║
-    ║           XSSDetector | LogAnalyzer | ConfigAuditor    ║
-    ║                                                       ║
-    ║   Skills: full_security_review | quick_scan            ║
-    ║           dependency_check                             ║
-    ║                                                       ║
-    ╚═══════════════════════════════════════════════════════╝
-    {Style.RESET_ALL}"""
-    print(banner)
-
-
 def print_tools_info():
-    """Imprime información sobre las herramientas disponibles."""
-    print(f"\n{Fore.CYAN}  🔧 Herramientas (Tools) del Agente:{Style.RESET_ALL}")
-    tools = [
-        ("🔑 SecretScanner", "Detecta secretos expuestos (API keys, passwords, tokens)"),
-        ("📦 DependencyAudit", "Audita dependencias contra CVEs conocidos"),
-        ("💉 SQLiDetector", "Detecta patrones de inyección SQL"),
-        ("🌐 XSSDetector", "Detecta vulnerabilidades Cross-Site Scripting"),
-        ("📋 LogAnalyzer", "Analiza logs en busca de patrones de ataque"),
-        ("⚙️  ConfigAuditor", "Audita configuraciones de seguridad"),
-    ]
-    for name, desc in tools:
-        print(f"    {name:25s} — {desc}")
+    """Imprime herramientas y skills disponibles."""
+    tools = Table(title="Herramientas", title_justify="left", title_style="bold",
+                  box=box.SIMPLE_HEAD, show_edge=False, header_style="dim")
+    tools.add_column("Tool", style="bold cyan", no_wrap=True)
+    tools.add_column("Detecta")
+    for name, desc in TOOLS_INFO:
+        tools.add_row(name, desc)
 
-    print(f"\n{Fore.CYAN}  🎯 Skills del Agente:{Style.RESET_ALL}")
-    skills = [
-        ("full_security_review", "Revisión completa con todas las herramientas"),
-        ("quick_scan", "Escaneo rápido (secretos + SQLi)"),
-        ("dependency_check", "Solo auditoría de dependencias"),
-    ]
-    for name, desc in skills:
-        print(f"    {name:25s} — {desc}")
-    print()
+    skills = Table(title="Skills", title_justify="left", title_style="bold",
+                   box=box.SIMPLE_HEAD, show_edge=False, header_style="dim")
+    skills.add_column("Skill", style="bold cyan", no_wrap=True)
+    skills.add_column("Descripción")
+    skills.add_column("Tools", style="dim")
+    for key, info in SecurityReviewSkill.SKILL_DEFINITIONS.items():
+        skills.add_row(key, info["name"], ", ".join(info["tools_used"]))
+
+    console.print()
+    console.print(tools)
+    console.print()
+    console.print(skills)
+    console.print()
+
+
+def error(message: str) -> int:
+    console.print(f"[bold red]error[/] {message}", highlight=False)
+    return EXIT_ERROR
 
 
 def main():
     """Punto de entrada principal del agente."""
     parser = SecScanArgumentParser(
-        description="🛡️ SecScan Agent — Agente Inteligente de Revisión de Seguridad",
+        description="SecScan Agent — Agente Inteligente de Revisión de Seguridad",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Ejemplos:
   python main.py --target ./test_project
-  python main.py --target ./test_project --logs ./test_project/logs
-  python main.py --target ./test_project --format html
+  python main.py --target ./test_project --logs ./test_project/logs --format html
+  python main.py --target ./test_project --format pdf --lang en
   python main.py --target ./test_project --skill quick_scan
   python main.py --list-tools
 
 Códigos de salida: 0 = sin hallazgos, 1 = hallazgos, 2 = hallazgos críticos, 3 = error
         """,
     )
-
-    parser.add_argument(
-        "--target", "-t",
-        help="Directorio del proyecto a analizar",
-    )
-    parser.add_argument(
-        "--logs", "-l",
-        help="Directorio de logs a analizar (opcional)",
-        default=None,
-    )
-    parser.add_argument(
-        "--format", "-f",
-        choices=["text", "html", "json"],
-        default="text",
-        help="Formato del reporte (default: text)",
-    )
-    parser.add_argument(
-        "--skill", "-s",
-        choices=["full_security_review", "quick_scan", "dependency_check"],
-        default="full_security_review",
-        help="Skill a ejecutar (default: full_security_review)",
-    )
-    parser.add_argument(
-        "--output", "-o",
-        default="reports",
-        help="Directorio de salida para reportes (default: reports)",
-    )
-    parser.add_argument(
-        "--quiet", "-q",
-        action="store_true",
-        help="Modo silencioso (menos output en terminal)",
-    )
-    parser.add_argument(
-        "--list-tools",
-        action="store_true",
-        help="Listar herramientas y skills disponibles",
-    )
+    parser.add_argument("--target", "-t", help="Directorio del proyecto a analizar")
+    parser.add_argument("--logs", "-l", default=None, help="Directorio de logs a analizar (opcional)")
+    parser.add_argument("--format", "-f", choices=FORMATS, default="text",
+                        help="Formato del reporte (default: text)")
+    parser.add_argument("--lang", choices=SUPPORTED_LANGS, default="es",
+                        help="Idioma del reporte (default: es)")
+    parser.add_argument("--skill", "-s", choices=list(SecurityReviewSkill.SKILL_DEFINITIONS),
+                        default="full_security_review",
+                        help="Skill a ejecutar (default: full_security_review)")
+    parser.add_argument("--output", "-o", default="reports",
+                        help="Directorio de salida para reportes (default: reports)")
+    parser.add_argument("--quiet", "-q", action="store_true",
+                        help="Modo silencioso: solo el resultado final")
+    parser.add_argument("--list-tools", action="store_true",
+                        help="Listar herramientas y skills disponibles")
 
     args = parser.parse_args()
 
-    # Mostrar banner
     if not args.quiet or args.list_tools:
         print_banner()
 
-    # Si pidieron listar herramientas
     if args.list_tools:
         print_tools_info()
-        return 0
+        return EXIT_CLEAN
 
-    # Validar que se proporcionó un target
     if not args.target:
-        print(f"{Fore.RED}  ❌ Error: Debe especificar un directorio con --target{Style.RESET_ALL}")
-        print(f"  Uso: python main.py --target ./mi_proyecto")
-        print(f"  Demo: python main.py --target ./test_project --format html")
+        error("debe especificar un directorio con --target")
+        console.print("  [dim]Demo:[/] python main.py --target ./test_project --logs ./test_project/logs --format html")
         return EXIT_ERROR
 
-    # Validar que el directorio existe
     if not os.path.isdir(args.target):
-        print(f"{Fore.RED}  ❌ Error: El directorio '{args.target}' no existe{Style.RESET_ALL}")
-        return EXIT_ERROR
+        return error(f"el directorio '{args.target}' no existe")
 
-    # Validar directorio de logs si se proporcionó
     if args.logs and not os.path.isdir(args.logs):
-        print(f"{Fore.YELLOW}  ⚠️  Advertencia: El directorio de logs '{args.logs}' no existe{Style.RESET_ALL}")
+        console.print(f"[yellow]aviso[/] el directorio de logs '{args.logs}' no existe; se omite el análisis de logs")
         args.logs = None
 
-    # Ejecutar el skill seleccionado
     skill = SecurityReviewSkill(verbose=not args.quiet)
-    results = skill.execute(
-        skill_name=args.skill,
-        target_path=args.target,
-        logs_path=args.logs,
-        output_format=args.format,
-        output_dir=args.output,
-    )
+    try:
+        results = skill.execute(
+            skill_name=args.skill,
+            target_path=args.target,
+            logs_path=args.logs,
+            output_format=args.format,
+            output_dir=args.output,
+            lang=args.lang,
+        )
+    except PdfUnavailableError as e:
+        return error(str(e))
 
     if "error" in results:
-        print(f"{Fore.RED}  ❌ Error: {results['error']}{Style.RESET_ALL}")
-        return EXIT_ERROR
+        return error(results["error"])
 
-    # Resumen final
-    total = results.get("total_findings", 0)
-    critical = results.get("severity_counts", {}).get("CRITICA", 0)
+    print_final(results, build_insights(results, args.lang))
 
-    print(f"\n{'═' * 55}")
-    if total == 0:
-        print(f"  {Fore.GREEN}✅ ¡No se encontraron vulnerabilidades!{Style.RESET_ALL}")
-    elif critical > 0:
-        print(f"  {Fore.RED}🚨 Se encontraron {critical} vulnerabilidades CRÍTICAS{Style.RESET_ALL}")
-        print(f"  {Fore.RED}   Acción inmediata requerida.{Style.RESET_ALL}")
-    else:
-        print(f"  {Fore.YELLOW}⚠️  Se encontraron {total} hallazgos de seguridad{Style.RESET_ALL}")
-
-    print(f"  📄 Reporte: {results.get('report_path', 'N/A')}")
     tool_errors = results.get("tool_errors", 0)
     if tool_errors:
-        print(f"  {Fore.RED}❌ {tool_errors} herramienta(s) fallaron: el análisis está incompleto.{Style.RESET_ALL}")
-    print(f"{'═' * 55}\n")
+        console.print(f"[bold red]error[/] {tool_errors} herramienta(s) fallaron: el análisis está incompleto")
 
     # Código de salida: un análisis incompleto no puede reportarse como "limpio"
+    total = results.get("total_findings", 0)
+    critical = results.get("severity_counts", {}).get("CRITICA", 0)
     if tool_errors:
         return EXIT_ERROR
     if critical > 0:
