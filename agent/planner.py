@@ -276,20 +276,15 @@ class Planner:
     def explain_plan(self, plan: ActionPlan) -> str:
         """Genera una explicación legible del plan (chain of thought)."""
         lines = [
-            "═══════════════════════════════════════════════════",
-            "  🧠 RAZONAMIENTO DEL AGENTE — Plan de Análisis",
-            "═══════════════════════════════════════════════════",
+            "RAZONAMIENTO DEL AGENTE — Plan de análisis",
             "",
-            f"  📂 Proyecto: {plan.context.target_path}",
-            f"  📄 Archivos encontrados: {plan.context.total_files}",
-            f"  🔧 Herramientas a ejecutar: {len(plan.steps)}",
+            f"  Proyecto:               {plan.context.target_path}",
+            f"  Archivos encontrados:   {plan.context.total_files}",
+            f"  Herramientas a ejecutar: {len(plan.steps)}",
             "",
         ]
-
         for i, step in enumerate(plan.steps, 1):
-            lines.append(f"  Paso {i}: [{step['tool']}]")
-            lines.append(f"    → {step['reason'][:100]}...")
-            lines.append("")
-
-        lines.append("═══════════════════════════════════════════════════")
+            lines.append(f"  {i}. [{step['tool']}] {step['reason']}")
+        if plan.skipped:
+            lines.append(f"  Omitidas por el skill: {', '.join(plan.skipped)}")
         return "\n".join(lines)

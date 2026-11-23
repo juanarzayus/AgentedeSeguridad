@@ -1,6 +1,6 @@
 """
 App Flask con vulnerabilidades INTENCIONALES para demostración.
-⚠️  Este archivo es un EJEMPLO de código inseguro. NO usar en producción.
+Este archivo es un EJEMPLO de código inseguro. NO usar en producción.
 """
 
 from flask import Flask, request, render_template_string, make_response
@@ -21,7 +21,7 @@ def get_user():
     username = request.args.get('name', '')
     conn = sqlite3.connect('users.db')
     cursor = conn.cursor()
-    # ⚠️ VULNERABLE: concatenación de string en query SQL
+    # VULNERABLE: concatenación de string en query SQL
     cursor.execute("SELECT * FROM users WHERE username = '" + username + "'")
     user = cursor.fetchone()
     conn.close()
@@ -34,7 +34,7 @@ def search():
     query = request.args.get('q', '')
     conn = sqlite3.connect('products.db')
     cursor = conn.cursor()
-    # ⚠️ VULNERABLE: f-string en query SQL
+    # VULNERABLE: f-string en query SQL
     cursor.execute(f"SELECT * FROM products WHERE name LIKE '%{query}%'")
     results = cursor.fetchall()
     conn.close()
@@ -48,7 +48,7 @@ def search():
 def greet():
     """Endpoint vulnerable a XSS via render_template_string."""
     name = request.args.get('name', 'World')
-    # ⚠️ VULNERABLE: render_template_string con input del usuario
+    # VULNERABLE: render_template_string con input del usuario
     return render_template_string(f"<h1>Hola {{ name | safe }}!</h1>", name=name)
 
 
@@ -56,7 +56,7 @@ def greet():
 def add_comment():
     """Endpoint vulnerable a XSS almacenado."""
     comment = request.form.get('comment', '')
-    # ⚠️ VULNERABLE: HTML sin escape
+    # VULNERABLE: HTML sin escape
     response = make_response(f"<div class='comment'>{comment}</div>")
     return response
 
