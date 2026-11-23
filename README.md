@@ -65,6 +65,32 @@ python main.py --target ./test_project --logs ./test_project/logs --format html
 
 Esto generará un reporte completo en `reports/security_report_<AAAAMMDD_HHMMSS>.html`.
 
+### Interfaz gráfica local
+
+```bash
+python main.py --web
+```
+
+Abre en el navegador una interfaz para elegir la carpeta, el tipo de análisis y el idioma, y muestra en vivo
+cómo el agente observa, planifica y ejecuta cada herramienta. Al terminar presenta el puntaje de riesgo, las
+acciones prioritarias y permite abrir el reporte completo o descargarlo en PDF, JSON o HTML.
+
+Opciones: `--port 8765` (puerto) y `--no-browser` (no abrir el navegador automáticamente).
+
+La interfaz puede leer cualquier carpeta del equipo, así que está diseñada para que **solo la use quien la inició**:
+
+| Control | Qué evita |
+|---------|-----------|
+| Escucha únicamente en `127.0.0.1` (no hay opción para exponerla) | Acceso desde otros equipos de la red |
+| Token aleatorio en el enlace de la terminal → cookie `HttpOnly`, `SameSite=Strict` | Uso por otros usuarios o procesos del equipo |
+| Validación del encabezado `Host` | Ataques de *DNS rebinding* desde páginas web maliciosas |
+| Token CSRF obligatorio en cada `POST` | Que otra página lance análisis en tu nombre |
+| CSP estricta sin scripts en línea; contenido insertado como texto | XSS a partir de rutas o hallazgos |
+| Reportes servidos con `CSP: sandbox` | Que el JavaScript del reporte acceda a la API |
+| Descargas por ID de análisis, nunca por ruta; selector que lista solo carpetas | Lectura arbitraria de archivos (*path traversal*) |
+| Un análisis a la vez; sin subida de archivos | Abuso de recursos y archivos de terceros |
+| Errores genéricos en el navegador (el detalle queda en la terminal) | Filtración de información interna |
+
 ### Formatos de reporte
 
 | Formato | Para qué |
@@ -112,7 +138,6 @@ Además, el agente reduce falsos positivos por sí solo:
 
 Este repositorio incluye su propio `.secscanignore`, que excluye `test_project/` (vulnerable a propósito, se analiza por separado) y `tests/` (secretos falsos de prueba). Analizar el repositorio completo da **0 hallazgos**, y hay un test que lo verifica.
 
-
 ### Ejecutar los tests
 
 ```bash
@@ -159,6 +184,13 @@ Agente/
 │   ├── i18n.py              # Textos del reporte (es, en)
 │   ├── templates/           # Plantilla del reporte
 │   └── assets/              # Fuentes (Inter, JetBrains Mono) e íconos (Lucide)
+│
+├── webapp/                  # Interfaz gráfica local (python main.py --web)
+│   ├── server.py            # Servidor Flask/Waitress y controles de seguridad
+│   ├── scans.py             # Ejecución en segundo plano y eventos en vivo
+│   ├── i18n.py              # Textos de la interfaz (es, en)
+│   ├── templates/           # Página principal y pantalla de sesión requerida
+│   └── static/              # CSS y JavaScript (sin dependencias externas)
 │
 └── test_project/            # Proyecto de prueba con vulnerabilidades intencionales
     ├── app.py               # App Flask con vulnerabilidades

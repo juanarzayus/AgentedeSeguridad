@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="{{ csrf_token }}">
+<title>SecScan</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+{# Datos para el JS: bloques JSON no ejecutables (compatibles con la CSP sin scripts en línea) #}
+<script id="i18n-data" type="application/json">{{ strings | tojson }}</script>
+<script id="skills-data" type="application/json">{{ skills | tojson }}</script>
+<script id="paths-data" type="application/json">{{ {'home': home, 'cwd': cwd} | tojson }}</script>
+
+{# Íconos reutilizados por el JS #}
+<template id="icon-check">{{ icon('check') }}</template>
+<template id="icon-x">{{ icon('x') }}</template>
+<template id="icon-folder">{{ icon('folder') }}</template>
+<template id="icon-crit">{{ icon('octagon-alert') }}</template>
+<template id="icon-high">{{ icon('triangle-alert') }}</template>
+<template id="icon-med">{{ icon('circle-alert') }}</template>
+<template id="icon-low">{{ icon('info') }}</template>
+<template id="icon-shield">{{ icon('shield-check') }}</template>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="logo">{{ icon('shield-check') }}</div>
+    <div>
+      <div class="brand-name">SecScan</div>
+      <div class="brand-sub" data-i18n="app_subtitle"></div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <span class="session-badge" title="127.0.0.1">{{ icon('lock') }}<span data-i18n="local_session"></span></span>
+    <div class="seg" role="group" aria-label="Idioma / Language">
+      {% for l in langs %}<button type="button" class="lang-btn" data-lang="{{ l }}">{{ l | upper }}</button>{% endfor %}
+    </div>
+    <button type="button" class="icon-btn" id="theme-toggle" data-i18n-title="toggle_theme">{{ icon('moon') }}</button>
+  </div>
+</header>
+
+<div class="layout">
+  {# ═══════════ Panel de configuración ═══════════ #}
+  <aside class="panel">
+    <form id="scan-form" novalidate>
+      <h2 data-i18n="new_scan"></h2>
+
+      <label class="field">
+        <span class="label" data-i18n="project"></span>
+        <div class="input-row">
+          <span class="input-icon">{{ icon('folder') }}</span>
+          <input id="target" name="target" type="text" spellcheck="false" autocomplete="off" placeholder="/home/usuario/proyecto">
+          <button type="button" class="btn ghost" data-browse="target" data-i18n="browse"></button>
+        </div>
+        <span class="hint" data-i18n="project_help"></span>
+      </label>
+
+      <label class="field">
+        <span class="label"><span data-i18n="logs"></span> <span class="muted">· <span data-i18n="optional"></span></span></span>
+        <div class="input-row">
+          <span class="input-icon">{{ icon('scroll-text') }}</span>
+          <input id="logs" name="logs" type="text" spellcheck="false" autocomplete="off" placeholder="/var/log/app">
+          <button type="button" class="btn ghost" data-browse="logs" data-i18n="browse"></button>
+        </div>
+        <span class="hint" data-i18n="logs_help"></span>
+      </label>
+
+      <fieldset class="field">
+        <legend class="label" data-i18n="skill"></legend>
+        <div class="skills" id="skills"></div>
+      </fieldset>
+
+      <div class="form-error" id="form-error" role="alert" hidden></div>
+
+      <button type="submit" class="btn primary block" id="run-btn">
+        {{ icon('play') }}<span data-i18n="run"></span>
+      </button>
+    </form>
+
+    <section class="history">
+      <h3>{{ icon('history') }}<span data-i18n="history"></span></h3>
+      <ul id="history-list"></ul>
+      <p class="muted small" id="history-empty" data-i18n="no_history"></p>
+    </section>
+  </aside>
+
+  {# ═══════════ Escenario ═══════════ #}
+  <main class="stage">
+    <section id="idle" class="idle">
+      <div class="idle-mark">{{ icon('scan-search') }}</div>
+      <h1 data-i18n="idle_title"></h1>
+      <p data-i18n="idle_text"></p>
+      <ol class="idle-steps">
+        <li><b>1</b><span data-i18n="phase_observe"></span></li>
+        <li><b>2</b><span data-i18n="phase_reason"></span></li>
+        <li><b>3</b><span data-i18n="phase_act"></span></li>
+        <li><b>4</b><span data-i18n="phase_report"></span></li>
+      </ol>
+    </section>
+
+    <section id="live" hidden>
+      <div class="live-head">
+        <div>
+          <div class="live-target mono" id="live-target"></div>
+          <div class="live-meta"><span class="chip" id="live-skill"></span><span class="muted" id="live-status"></span></div>
+        </div>
+      </div>
+
+      <ol class="stepper" id="stepper">
+        {% for key in ['observe', 'reason', 'act', 'report'] %}
+        <li data-phase="{{ key }}"><span class="dot">{{ loop.index }}</span><span data-i18n="phase_{{ key }}"></span></li>
+        {% endfor %}
+      </ol>
+
+      <div class="live-grid">
+        <div class="card" id="card-observe" hidden>
+          <div class="card-title">{{ icon('search') }}<span data-i18n="observed"></span></div>
+          <dl class="facts" id="facts"></dl>
+        </div>
+        <div class="card" id="card-plan" hidden>
+          <div class="card-title">{{ icon('route') }}<span data-i18n="plan"></span></div>
+          <ol class="plan" id="plan"></ol>
+          <p class="muted small" id="plan-note"></p>
+        </div>
+        <div class="card span-2" id="card-act" hidden>
+          <div class="card-title">{{ icon('activity') }}<span data-i18n="execution"></span></div>
+          <ul class="tools" id="tools"></ul>
+        </div>
+      </div>
+
+      <div id="result" hidden>
+        <div class="result-grid">
+          <div class="card result-score" id="result-score">
+            <div class="card-title">{{ icon('activity') }}<span data-i18n="risk_score"></span></div>
+            <div class="gauge-wrap"><svg class="gauge" id="gauge" viewBox="0 0 200 112" aria-hidden="true"></svg>
+              <div class="gauge-value"><strong id="score"></strong><span>/ 100</span></div></div>
+            <div class="verdict" id="verdict"><span class="verdict-icon" id="verdict-icon"></span><span id="verdict-text"></span></div>
+          </div>
+          <div class="card">
+            <div class="tiles" id="tiles"></div>
+            <div class="stack" id="stack"></div>
+            <p class="threats-line" id="threats-line"></p>
+            <p class="tool-errors" id="tool-errors" hidden></p>
+            <div class="result-actions">
+              <a class="btn primary" id="open-report" target="_blank" rel="noopener">{{ icon('external-link') }}<span data-i18n="open_report"></span></a>
+              <a class="btn" id="dl-pdf">{{ icon('file-down') }}PDF</a>
+              <a class="btn" id="dl-json">{{ icon('file-json') }}JSON</a>
+              <a class="btn" id="dl-html">{{ icon('file-text') }}HTML</a>
+            </div>
+            <p class="form-error" id="download-error" hidden></p>
+          </div>
+        </div>
+        <div class="result-grid">
+          <div class="card">
+            <div class="card-title">{{ icon('list-checks') }}<span data-i18n="priority_actions"></span></div>
+            <ol class="actions" id="actions"></ol>
+          </div>
+          <div class="card">
+            <div class="card-title">{{ icon('bug') }}<span data-i18n="top_findings"></span></div>
+            <ul class="top" id="top"></ul>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="picker">
+  <div class="picker">
+    <div class="picker-head">
+      <h3 data-i18n="choose_folder"></h3>
+      <div class="picker-path mono" id="picker-path"></div>
+    </div>
+    <ul class="picker-list" id="picker-list"></ul>
+    <div class="picker-foot">
+      <button type="button" class="btn ghost" id="picker-up">{{ icon('corner-left-up') }}<span data-i18n="parent"></span></button>
+      <span class="spacer"></span>
+      <button type="button" class="btn ghost" id="picker-cancel" data-i18n="cancel"></button>
+      <button type="button" class="btn primary" id="picker-use" data-i18n="use_folder"></button>
+    </div>
+  </div>
+</dialog>
+</body>
+</html>

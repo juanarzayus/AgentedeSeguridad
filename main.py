@@ -100,6 +100,7 @@ Ejemplos:
   python main.py --target ./test_project --format pdf --lang en
   python main.py --target ./test_project --skill quick_scan
   python main.py --list-tools
+  python main.py --web                 (interfaz gráfica local en 127.0.0.1)
 
 Códigos de salida: 0 = sin hallazgos, 1 = hallazgos, 2 = hallazgos críticos, 3 = error
         """,
@@ -119,6 +120,12 @@ Códigos de salida: 0 = sin hallazgos, 1 = hallazgos, 2 = hallazgos críticos, 3
                         help="Modo silencioso: solo el resultado final")
     parser.add_argument("--list-tools", action="store_true",
                         help="Listar herramientas y skills disponibles")
+    parser.add_argument("--web", action="store_true",
+                        help="Abrir la interfaz gráfica local (solo accesible desde este equipo)")
+    parser.add_argument("--port", type=int, default=8765,
+                        help="Puerto de la interfaz web (default: 8765)")
+    parser.add_argument("--no-browser", action="store_true",
+                        help="No abrir el navegador automáticamente con --web")
 
     args = parser.parse_args()
 
@@ -127,6 +134,22 @@ Códigos de salida: 0 = sin hallazgos, 1 = hallazgos, 2 = hallazgos críticos, 3
 
     if args.list_tools:
         print_tools_info()
+        return EXIT_CLEAN
+
+    if args.web:
+        if not 1024 <= args.port <= 65535:
+            return error("el puerto debe estar entre 1024 y 65535")
+        try:
+            from webapp.server import serve
+        except ImportError:
+            return error("faltan dependencias de la interfaz web: pip install -r requirements.txt")
+        try:
+            serve(port=args.port, open_browser=not args.no_browser,
+                  output_dir=os.path.join(args.output, "web"))
+        except OSError as e:
+            return error(f"no se pudo iniciar el servidor en el puerto {args.port}: {e.strerror}")
+        except KeyboardInterrupt:
+            pass
         return EXIT_CLEAN
 
     if not args.target:
