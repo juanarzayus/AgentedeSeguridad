@@ -1,14 +1,14 @@
-# 🛡️ Agente Inteligente de Revisión de Seguridad
+# SecScan Agent — Agente Inteligente de Revisión de Seguridad
 
 ## Descripción
 
-es un agente inteligente de seguridad que analiza repositorios de código y archivos de logs para detectar vulnerabilidades comunes. Utiliza un sistema de **tools** (herramientas) y **skills** (habilidades) para razonar sobre el código, ejecutar análisis automatizados, y generar reportes priorizados.
+**SecScan Agent** es un agente inteligente de seguridad que analiza repositorios de código y archivos de logs para detectar vulnerabilidades comunes. Utiliza un sistema de **tools** (herramientas) y **skills** (habilidades) para razonar sobre el código, ejecutar análisis automatizados, y generar reportes priorizados.
 
 ### Problemática que resuelve
 
 En el desarrollo de software, los equipos frecuentemente introducen vulnerabilidades de seguridad sin darse cuenta: secretos hardcodeados (API keys, contraseñas), dependencias con CVEs conocidos, inyecciones SQL, XSS, y configuraciones inseguras. Las revisiones manuales son lentas y propensas a errores. **SecScan Agent** automatiza este proceso usando IA.
 
-## 🚀 Cómo ejecutar
+## Cómo ejecutar
 
 ### Prerrequisitos
 
@@ -24,7 +24,15 @@ cd Agente
 
 # Instalar dependencias
 pip install -r requirements.txt
+
+# Opcional: exportación a PDF (WeasyPrint)
+pip install -r requirements-pdf.txt
 ```
+
+> **PDF en Windows:** WeasyPrint necesita GTK3 instalado aparte
+> ([instrucciones](https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#windows)).
+> Sin él, el reporte HTML funciona igual y desde el navegador se puede usar
+> *Imprimir → Guardar como PDF*, que también está maquetado para A4.
 
 ### Uso
 
@@ -41,6 +49,9 @@ python main.py --target ./test_project --format html
 # Generar reporte en JSON
 python main.py --target ./test_project --format json
 
+# Generar reporte en PDF, en inglés
+python main.py --target ./test_project --format pdf --lang en
+
 # Ver ayuda completa
 python main.py --help
 ```
@@ -54,6 +65,26 @@ python main.py --target ./test_project --logs ./test_project/logs --format html
 
 Esto generará un reporte completo en `reports/security_report_<AAAAMMDD_HHMMSS>.html`.
 
+### Formatos de reporte
+
+| Formato | Para qué |
+|---|---|
+| `html` | Reporte interactivo: filtros por severidad y herramienta, búsqueda, tema claro/oscuro. Autocontenido (funciona sin internet). |
+| `pdf` | El mismo reporte maquetado en A4, con encabezado, pie y numeración. Para entregar o archivar. |
+| `json` | Integración con otras herramientas (incluye puntaje, veredicto y acciones prioritarias). |
+| `text` | Texto plano para tickets o correos. |
+
+Idiomas disponibles con `--lang`: `es` (por defecto) y `en`.
+
+El reporte está pensado para tomar decisiones:
+
+1. **Resumen ejecutivo** — puntaje de riesgo 0–100, veredicto ("No apto para producción", etc.) y distribución por severidad.
+2. **Acciones prioritarias** — los hallazgos agrupados por la acción que los corrige (p. ej. "Rotar credenciales" resuelve 16 hallazgos), con severidad y esfuerzo estimado.
+3. **OWASP Top 10 y archivos más afectados.**
+4. **Actividad de amenazas** — los eventos de los logs se informan aparte de las vulnerabilidades del código: IPs atacantes, tipos de ataque y atacantes activos.
+5. **Hallazgos detallados** — riesgo, corrección, CWE y el código con contexto. Los secretos aparecen siempre enmascarados, también en las líneas de contexto.
+6. **Razonamiento del agente** — el plan que siguió y por qué eligió cada herramienta.
+
 ### Códigos de salida
 
 | Código | Significado |
@@ -61,7 +92,7 @@ Esto generará un reporte completo en `reports/security_report_<AAAAMMDD_HHMMSS>
 | `0` | Sin hallazgos |
 | `1` | Hallazgos de severidad ALTA, MEDIA o BAJA |
 | `2` | Al menos un hallazgo CRÍTICO |
-| `3` | Error de uso o de ejecución (argumento inválido, directorio inexistente, una herramienta falló) |
+| `3` | Error de uso o de ejecución (argumento inválido, directorio inexistente, una herramienta falló, PDF no disponible) |
 
 ### Suprimir falsos positivos
 
@@ -81,12 +112,13 @@ pip install -r requirements-dev.txt
 pytest -q
 ```
 
-## 📁 Estructura del Proyecto
+## Estructura del proyecto
 
 ```
 Agente/
 ├── main.py                  # Punto de entrada y CLI
 ├── requirements.txt         # Dependencias
+├── requirements-pdf.txt     # Dependencia opcional para PDF (WeasyPrint)
 ├── requirements-dev.txt     # Dependencias de desarrollo (pytest)
 ├── README.md                # Este archivo
 │
@@ -94,6 +126,7 @@ Agente/
 │   ├── __init__.py
 │   ├── orchestrator.py      # Orquestador principal (razonamiento + ejecución)
 │   ├── findings.py          # Modelo Finding, enmascarado, deduplicación, supresiones
+│   ├── ui.py                # Salida de terminal (rich) desacoplada del orquestador
 │   ├── planner.py           # Planificador basado en reglas
 │   └── tool_registry.py     # Registro y gestión de herramientas
 │
@@ -112,7 +145,12 @@ Agente/
 │
 ├── report/                  # Generación de reportes
 │   ├── __init__.py
-│   └── generator.py         # Generador de reportes (texto, HTML, JSON)
+│   ├── generator.py         # Punto de entrada: texto, JSON, HTML, PDF
+│   ├── insights.py          # Puntaje de riesgo, veredicto, acciones, amenazas
+│   ├── html_report.py       # Render Jinja2 → HTML / WeasyPrint → PDF
+│   ├── i18n.py              # Textos del reporte (es, en)
+│   ├── templates/           # Plantilla del reporte
+│   └── assets/              # Fuentes (Inter, JetBrains Mono) e íconos (Lucide)
 │
 └── test_project/            # Proyecto de prueba con vulnerabilidades intencionales
     ├── app.py               # App Flask con vulnerabilidades
@@ -124,7 +162,7 @@ Agente/
         └── access.log       # Logs con patrones sospechosos
 ```
 
-## 🧠 Skills del Agente
+## Skills del agente
 
 | Skill | Descripción |
 |-------|-------------|
@@ -134,7 +172,7 @@ Agente/
 
 Cada skill define qué herramientas puede usar; el planner omite (y lo deja registrado en el plan) las que no forman parte del skill.
 
-## 🔧 Tools del Agente
+## Tools del agente
 
 | Tool | Función | Detecta |
 |------|---------|---------|
@@ -147,20 +185,20 @@ Cada skill define qué herramientas puede usar; el planner omite (y lo deja regi
 
 Cada hallazgo incluye su **CWE**, categoría **OWASP Top 10**, un nivel de **confianza** y, si varias herramientas detectaron lo mismo, cuáles (`also_detected_by`). Los secretos se enmascaran siempre antes de llegar al reporte.
 
-## 📊 Ejemplo de Reporte
+## Reporte
 
 El agente genera un reporte priorizado con severidades:
 
-- 🔴 **CRÍTICA** — Secretos expuestos, inyección SQL confirmada
-- 🟠 **ALTA** — Dependencias con CVE conocido, XSS
-- 🟡 **MEDIA** — Configuraciones inseguras, debug habilitado
-- 🔵 **BAJA** — Mejores prácticas, sugerencias de hardening
+- **CRÍTICA** — Secretos expuestos, inyección SQL confirmada
+- **ALTA** — Dependencias con CVE conocido, XSS
+- **MEDIA** — Configuraciones inseguras, debug habilitado
+- **BAJA** — Mejores prácticas, sugerencias de hardening
 
-## 👥 Equipo
+## Equipo
 
 - Proyecto Final — Inteligencia Artificial
 - Línea 4: Agentes Inteligentes con Tools y Skills
 
-## 📄 Licencia
+## Licencia
 
 Proyecto académico — Universidad
