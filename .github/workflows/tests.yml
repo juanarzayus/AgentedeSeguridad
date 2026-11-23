@@ -17,6 +17,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+      - name: Librerías de sistema para WeasyPrint (PDF)
+        run: sudo apt-get update && sudo apt-get install -y libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz-subset0
       - run: pip install -r requirements-dev.txt
       - run: pytest -q
       - name: Demo sobre el proyecto vulnerable (debe salir con código 2 = críticos)
@@ -25,3 +27,13 @@ jobs:
           python main.py --target ./test_project --logs ./test_project/logs --format json --quiet
           code=$?
           test "$code" -eq 2
+      - name: Reporte PDF de la demo
+        run: |
+          set +e
+          python main.py --target ./test_project --logs ./test_project/logs --format pdf --quiet --output reports
+          test "$?" -eq 2
+      - uses: actions/upload-artifact@v4
+        if: matrix.python-version == '3.12'
+        with:
+          name: reporte-demo
+          path: reports/*.pdf
