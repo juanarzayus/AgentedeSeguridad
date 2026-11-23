@@ -205,3 +205,27 @@ def scan_secrets(files: list[str]) -> list[dict]:
                 ).to_dict())
 
     return findings
+
+
+# Asignaciones con nombre sensible: se redactan aunque el valor parezca un placeholder,
+# porque aquí el objetivo es no filtrar nada (no evitar falsos positivos).
+_SENSITIVE_ASSIGNMENT = re.compile(
+    r"""(?:pass(?:word|wd)?|pwd|secret|token|api[_-]?key|private[_-]?key|credential)\w*['"\]]*\s*[=:]\s*['"]([^'"]{4,})['"]""",
+    re.IGNORECASE,
+)
+
+
+def redact_line(line: str) -> str:
+    """
+    Enmascara cualquier secreto de una línea arbitraria.
+
+    Se usa para las líneas de contexto que el reporte muestra alrededor de un
+    hallazgo: esas líneas no pasaron por el escáner y podrían contener otros
+    secretos (p. ej. un .env completo).
+    """
+    values = []
+    for pattern in SECRET_PATTERNS:
+        for match in re.finditer(pattern["regex"], line, re.IGNORECASE):
+            values.append(_secret_value(match))
+    values.extend(m.group(1) for m in _SENSITIVE_ASSIGNMENT.finditer(line))
+    return mask_in_line(line, values) if values else line

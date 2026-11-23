@@ -1,0 +1,6 @@
+# Exportación a PDF (--format pdf). Opcional.
+# Linux/macOS: funciona directo con pip.
+# Windows: requiere además GTK3 —
+#   https://doc.courtbouillon.org/weasyprint/stable/first_steps.html#windows
+-r requirements.txt
+weasyprint>=62
