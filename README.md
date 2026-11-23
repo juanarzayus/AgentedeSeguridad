@@ -105,6 +105,14 @@ tests/fixtures/
 *.min.js
 ```
 
+Además, el agente reduce falsos positivos por sí solo:
+
+- **No analiza sus propios reportes** (llevan la marca `<meta name="generator" content="SecScan Agent">`): citan el código vulnerable que encontraron y se detectarían a sí mismos.
+- **En Python entiende el contexto léxico** (`tools/source_context.py`): busca llamadas peligrosas (`eval(`, `render_template_string(`) solo en código, no en strings, comentarios o docstrings; y patrones de HTML/JS (`innerHTML`, `|safe`) solo dentro de strings que contienen HTML o plantillas.
+
+Este repositorio incluye su propio `.secscanignore`, que excluye `test_project/` (vulnerable a propósito, se analiza por separado) y `tests/` (secretos falsos de prueba). Analizar el repositorio completo da **0 hallazgos**, y hay un test que lo verifica.
+
+
 ### Ejecutar los tests
 
 ```bash

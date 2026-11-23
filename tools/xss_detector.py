@@ -9,13 +9,18 @@ import os
 import re
 
 from agent.findings import Finding
+from tools.source_context import python_views
 
 OWASP_INJECTION = "A03:2021 Injection"
 
 
+# "kind": en archivos Python, los patrones "call" se buscan en el código (sin el contenido
+# de los strings) y los "markup" solo dentro de strings que parecen HTML/plantillas.
+# Así, el texto "eval() ejecuta código" de una descripción no se confunde con una llamada.
 XSS_PATTERNS = [
     {
         "name": "innerHTML sin sanitización",
+        "kind": "markup",
         "cwe": "CWE-79",
         "regex": r"""\.innerHTML\s*=\s*(?!['"]<)""",
         "severity": "ALTA",
@@ -25,6 +30,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "document.write()",
+        "kind": "markup",
         "cwe": "CWE-79",
         "regex": r"""document\.write\s*\(""",
         "severity": "ALTA",
@@ -33,6 +39,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "eval() con input dinámico",
+        "kind": "call",
         "cwe": "CWE-95",
         "regex": r"""eval\s*\(\s*(?!['"])""",
         "severity": "CRITICA",
@@ -42,6 +49,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "Jinja2/Flask sin escape (|safe)",
+        "kind": "markup",
         "cwe": "CWE-79",
         "regex": r"""\{\{.*\|\s*safe\s*\}\}""",
         "severity": "ALTA",
@@ -50,7 +58,8 @@ XSS_PATTERNS = [
         "recommendation": "Eliminar |safe o asegurar que el contenido está sanitizado antes de usarlo.",
     },
     {
-        "name": "Template sin escape ({% autoescape false %})",
+        "name": "Template sin escape ({% autoescape false %})",  # secscan: ignore (nombre de la regla, no una plantilla)
+        "kind": "markup",
         "cwe": "CWE-79",
         "regex": r"""\{%\s*autoescape\s+false\s*%\}""",
         "severity": "ALTA",
@@ -60,6 +69,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "render_template_string() en Flask",
+        "kind": "call",
         "cwe": "CWE-1336",
         "regex": r"""render_template_string\s*\(""",
         "severity": "CRITICA",
@@ -69,6 +79,7 @@ XSS_PATTERNS = [
     },
     {
         "name": "jQuery .html() con datos dinámicos",
+        "kind": "markup",
         "cwe": "CWE-79",
         "regex": r"""\$\(.*\)\.html\s*\(\s*(?!['"])""",
         "severity": "ALTA",
@@ -77,14 +88,16 @@ XSS_PATTERNS = [
     },
     {
         "name": "Respuesta HTTP sin Content-Type",
+        "kind": "call",
         "cwe": "CWE-79",
-        "regex": r"""(?:make_response|Response)\s*\([^)]*\)(?!.*content_type)""",
+        "regex": r"""(?:make_response|Response)\s*\((?!\s*(?:render_template|jsonify)\b)[^)]*\)(?!.*content_type)""",
         "severity": "MEDIA",
         "description": "Respuesta HTTP sin Content-Type explícito puede ser interpretada como HTML.",
         "recommendation": "Establecer Content-Type explícitamente: response.headers['Content-Type'] = 'application/json'",
     },
     {
         "name": "Markup.format() en Flask/Jinja2",
+        "kind": "call",
         "cwe": "CWE-79",
         "regex": r"""Markup\s*\(.*\.format\(""",
         "severity": "ALTA",
@@ -120,9 +133,19 @@ def detect_xss(files: list[str]) -> list[dict]:
         except (OSError, PermissionError):
             continue
 
+        views = python_views("".join(lines)) if ext == ".py" else None
+
         for line_num, line in enumerate(lines, 1):
             for pattern in XSS_PATTERNS:
-                if re.search(pattern["regex"], line, re.IGNORECASE):
+                subject = line
+                if views is not None:
+                    if line_num in views.doc_lines:
+                        continue
+                    if pattern["kind"] == "call":
+                        subject = views.code[line_num - 1]
+                    elif line_num not in views.markup_lines:
+                        continue
+                if re.search(pattern["regex"], subject, re.IGNORECASE):
                     findings.append(Finding(
                         tool="XSSDetector",
                         file=filepath,

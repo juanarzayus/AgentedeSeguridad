@@ -12,6 +12,7 @@ Revisa archivos de configuración en busca de configuraciones peligrosas:
 import os
 import re
 
+from tools.source_context import python_views
 from agent.findings import Finding, mask_in_line, mask_secret
 
 
@@ -139,7 +140,11 @@ def audit_config(files: list[str]) -> list[dict]:
         except (OSError, PermissionError):
             continue
 
+        views = python_views("".join(lines)) if filepath.endswith(".py") else None
+
         for line_num, line in enumerate(lines, 1):
+            if views is not None and line_num in views.doc_lines:
+                continue  # documentación, no configuración
             for pattern in CONFIG_PATTERNS:
                 match = re.search(pattern["regex"], line, re.IGNORECASE)
                 if not match:

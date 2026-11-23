@@ -1,0 +1,9 @@
+# Archivos que SecScan no debe analizar al revisar este repositorio.
+# (Formato: un patrón glob por línea; ver "Suprimir falsos positivos" en el README.)
+
+# Proyecto de demostración con vulnerabilidades intencionales.
+# Se analiza por separado: python main.py --target ./test_project
+test_project/
+
+# Tests: contienen secretos falsos y payloads de ataque a propósito
+tests/

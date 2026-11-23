@@ -11,6 +11,7 @@ similar a cómo un LLM planificaría una secuencia de acciones.
 
 import fnmatch
 import os
+import re
 from pathlib import Path
 from dataclasses import dataclass, field
 
@@ -30,6 +31,27 @@ def load_ignore_patterns(target_path: str) -> list[str]:
         return []
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         return [l.strip() for l in f if l.strip() and not l.lstrip().startswith("#")]
+
+
+GENERATED_MARKERS = ('<meta name="generator" content="SecScan Agent">', '"agent": "SecScan Agent"')
+_LEGACY_REPORT = re.compile(r"^security_report_\d{8}_\d{6}\.(?:html|json|txt)$")
+
+
+def is_generated_report(filepath: str) -> bool:
+    """
+    True si el archivo es un reporte creado por SecScan. Analizarlo produciría
+    cientos de falsos positivos: el reporte cita el código vulnerable que encontró.
+    """
+    name = os.path.basename(filepath)
+    if not name.endswith((".html", ".json", ".txt")):
+        return False
+    try:
+        with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(4096)
+    except OSError:
+        return False
+    # Reportes de versiones anteriores (sin la marca): se reconocen por su nombre exacto
+    return any(m in head for m in GENERATED_MARKERS) or bool(_LEGACY_REPORT.match(name))
 
 
 def is_ignored(rel_path: str, patterns: list[str]) -> bool:
@@ -144,7 +166,8 @@ class Planner:
                 filepath = os.path.join(root, f)
                 if f == IGNORE_FILE:
                     continue
-                if is_ignored(os.path.relpath(filepath, target_path), ignore_patterns):
+                if is_ignored(os.path.relpath(filepath, target_path), ignore_patterns) \
+                        or is_generated_report(filepath):
                     ctx.ignored_files += 1
                     continue
                 seen.add(Path(filepath).resolve())

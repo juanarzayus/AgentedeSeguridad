@@ -578,3 +578,58 @@ class TestNoEmojis(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestContextAwareDetection(unittest.TestCase):
+    """Los detectores distinguen código real de texto (strings, docstrings, reportes)."""
+
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir)
+
+    def write(self, name, content):
+        path = os.path.join(self.test_dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(content)
+        return path
+
+    def test_xss_ignores_text_but_detects_code(self):
+        path = self.write("rules.py", (
+            '"""Este módulo detecta eval() y render_template_string()."""\n'
+            'RULE = {"name": "eval() con input", "desc": "document.write() es peligroso"}\n'
+            '# render_template_string(x) en un comentario\n'
+            'def view(x):\n'
+            '    eval(x)\n'
+            '    return render_template_string(x)\n'
+            'PAGE = """\n<script>el.innerHTML = data;</script>\n"""\n'
+        ))
+        lines = sorted(f["line"] for f in detect_xss([path]))
+        self.assertEqual(lines, [5, 6, 8])  # eval, render_template_string, innerHTML en HTML embebido
+
+    def test_xss_invalid_python_falls_back_to_lines(self):
+        path = self.write("broken.py", 'def (:\n    eval(user)\n')
+        self.assertEqual([f["line"] for f in detect_xss([path])], [2])
+
+    def test_config_ignores_docstrings(self):
+        path = self.write("settings.py", (
+            '"""Revisa DEBUG = True y CORS (Access-Control-Allow-Origin: *)."""\n'
+            'DEBUG = True\n'
+        ))
+        self.assertEqual([f["line"] for f in audit_config([path])], [2])
+
+    def test_planner_skips_generated_reports(self):
+        os.makedirs(os.path.join(self.test_dir, "reports"))
+        self.write("reports/x.html", '<meta name="generator" content="SecScan Agent">\nrender_template_string(')
+        self.write("reports/security_report_20260101_120000.html", "<style>...</style>")
+        self.write("app.py", "eval(x)\n")
+        ctx = Planner().analyze_context(self.test_dir)
+        self.assertEqual([os.path.basename(f) for f in ctx.file_list], ["app.py"])
+        self.assertEqual(ctx.ignored_files, 2)
+
+    def test_repository_scans_clean(self):
+        """El propio repositorio no debe reportarse a sí mismo (lo usarían para evaluarlo)."""
+        repo = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        results = SecScanOrchestrator(verbose=False).run(repo)
+        self.assertEqual(results["total_findings"], 0, [(f["file"], f["line"], f["type"]) for f in results["findings"]])
