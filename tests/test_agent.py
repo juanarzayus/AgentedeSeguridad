@@ -383,7 +383,7 @@ class TestExitCodes(TempDirTestCase):
         self.assertEqual(self._main("-t", "/no/existe"), 3)
 
     def test_bad_argument_is_error_not_critical(self):
-        self.assertEqual(self._main("-t", TEST_PROJECT, "--format", "pdf"), 3)
+        self.assertEqual(self._main("-t", TEST_PROJECT, "--format", "docx"), 3)
 
 
 # ════════════════════════════════════════════════════════════
@@ -459,6 +459,121 @@ class TestSuppressions(TempDirTestCase):
         results = SecScanOrchestrator(verbose=False).run(self.test_dir)
         self.assertEqual(results["context"]["ignored_files"], 2)
         self.assertEqual({os.path.basename(f["file"]) for f in results["findings"]}, {"real.py"})
+
+
+# ════════════════════════════════════════════════════════════
+# Reporte visual (HTML/PDF), i18n e insights
+# ════════════════════════════════════════════════════════════
+
+LEAK_CANARIES = ("P@ssw0rd2024!", "MyDatabaseP@ssw0rd!", "sk-live-4eC39HqLyjWDarjtT1zdp7dc",
+                 "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", "SuperSecret123!", "password123",
+                 "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij", "my-jwt-secret-key-very-weak")
+
+
+def _weasyprint_available():
+    try:
+        import weasyprint  # noqa: F401
+        return True
+    except (ImportError, OSError):
+        return False
+
+
+class TestInsights(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from report.insights import build_insights
+        cls.results = SecScanOrchestrator(verbose=False).run(TEST_PROJECT, os.path.join(TEST_PROJECT, "logs"))
+        cls.ins = build_insights(cls.results)
+
+    def test_threats_are_separated_from_exposure(self):
+        self.assertEqual(self.ins["exposure_total"] + self.ins["threat_total"], self.results["total_findings"])
+        self.assertTrue(all(e["tool"] != "LogAnalyzer" for e in self.ins["entries"] if not e["is_threat"]))
+        self.assertGreater(self.ins["threat_events"], 0)
+
+    def test_verdict_and_score(self):
+        from report.insights import risk_score
+        self.assertEqual(self.ins["verdict"], "critical")
+        self.assertEqual(risk_score([]), 0)
+        low = risk_score([{"severity": "BAJA", "confidence": "BAJA"}])
+        high = risk_score([{"severity": "CRITICA", "confidence": "ALTA"}])
+        self.assertLess(low, high)
+        self.assertLessEqual(self.ins["risk_score"], 100)
+
+    def test_actions_cover_every_finding(self):
+        self.assertEqual(sum(a["count"] for a in self.ins["actions"]), self.results["total_findings"])
+        keys = [a["key"] for a in self.ins["actions"]]
+        self.assertIn("rotate_credentials", keys)
+        self.assertIn("parametrize_sql", keys)
+
+    def test_snippets_are_redacted(self):
+        dumped = repr([e["snippet"] for e in self.ins["entries"]])
+        for secret in LEAK_CANARIES:
+            self.assertNotIn(secret, dumped)
+
+
+class TestI18n(unittest.TestCase):
+    def test_all_languages_have_all_keys(self):
+        from report.i18n import STRINGS, DEFAULT_LANG
+        base = set(STRINGS[DEFAULT_LANG])
+        for lang, strings in STRINGS.items():
+            self.assertEqual(base - set(strings), set(), f"faltan claves en {lang}")
+
+    def test_english_html(self):
+        from report.html_report import render_html
+        results = SecScanOrchestrator(verbose=False).run(TEST_PROJECT)
+        html_text = render_html(results, lang="en")
+        self.assertIn('lang="en"', html_text)
+        self.assertIn("Executive summary", html_text)
+        self.assertNotIn("Resumen ejecutivo", html_text)
+
+
+class TestHtmlReport(TempDirTestCase):
+    def test_self_contained_and_secret_free(self):
+        from report.html_report import render_html
+        results = SecScanOrchestrator(verbose=False).run(TEST_PROJECT, os.path.join(TEST_PROJECT, "logs"))
+        html_text = render_html(results)
+        self.assertNotRegex(html_text, r'(?:src|href)="https?://')  # funciona sin internet
+        self.assertIn("@font-face", html_text)
+        for secret in LEAK_CANARIES:
+            self.assertNotIn(secret, html_text)
+
+    def test_css_string_cannot_break_out_of_style(self):
+        from report.html_report import css_string
+        self.assertNotRegex(str(css_string('x"; } </style><script>alert(1)</script>')), r'[<>"{};]')
+
+
+@unittest.skipUnless(_weasyprint_available(), "WeasyPrint no disponible")
+class TestPdfReport(TempDirTestCase):
+    def test_pdf_generation(self):
+        from pypdf import PdfReader
+        from report.generator import ReportGenerator
+        results = SecScanOrchestrator(verbose=False).run(TEST_PROJECT, os.path.join(TEST_PROJECT, "logs"))
+        for lang, heading in (("es", "Resumen ejecutivo"), ("en", "Executive summary")):
+            path = ReportGenerator().generate(results, format="pdf", output_dir=os.path.join(self.test_dir, lang), lang=lang)
+            reader = PdfReader(path)
+            self.assertGreater(len(reader.pages), 3)
+            text = "\n".join(page.extract_text() for page in reader.pages)
+            self.assertIn(heading, text)
+            for secret in LEAK_CANARIES:
+                self.assertNotIn(secret, text)
+
+
+class TestNoEmojis(unittest.TestCase):
+    """La interfaz usa íconos SVG y etiquetas de texto, no emojis."""
+
+    EMOJI = __import__("re").compile("[\U0001F300-\U0001FAFF\u2600-\u26FF\u2B00-\u2BFF\uFE0F]")
+
+    def test_sources_have_no_emojis(self):
+        offenders = []
+        for root, dirs, files in os.walk(REPO_ROOT):
+            dirs[:] = [d for d in dirs if d not in {".git", ".venv", "venv", "__pycache__", "reports", "assets"}]
+            for name in files:
+                if name.endswith((".py", ".md", ".j2", ".txt")):
+                    path = os.path.join(root, name)
+                    with open(path, encoding="utf-8", errors="ignore") as f:
+                        if self.EMOJI.search(f.read()):
+                            offenders.append(os.path.relpath(path, REPO_ROOT))
+        self.assertEqual(offenders, [])
 
 
 if __name__ == "__main__":
